@@ -58,15 +58,52 @@ bir yerde olur.
 
 ### 2. Projeye özgü dosyalar
 
-Bunlar kopyalanmaz, bu proje için yazılır:
+**Bunlar kopyalanmaz — her proje kendi dosyalarını yazar.** Vault'unkine örnek
+olarak bakabilirsiniz (`github.com/Aftermathy/vault`) ama içeriğini almayın:
+o dosyalar Vault'un ürününü, kurallarını ve tuzaklarını anlatıyor. Kopyalanan
+bir `CLAUDE.md`, ajanlara var olmayan bir projeyi öğretir.
 
-| Dosya | Ne |
+| Dosya | Zorunlu mu | Ne içerir |
+|---|---|---|
+| `.github/workflows/ci.yml` | **evet** | Projenin derleme, lint ve test komutları. Hattın CI kapısı bu dosyanın adını arıyor; farklı ad verilecekse `TOPLU_CI_AKISI` değişkenine yazın. |
+| `CLAUDE.md` | **evet** | Projenin kuralları, doğrulama komutları, bilinen tuzakları. Ajanların ilk okuduğu dosya. |
+| `docs/ROADMAP.md` | **evet** | Fazlar ve sabit kararlar. Biçim kısıtları aşağıda — uyulmazsa bekçi sessizce hiçbir şey işaretlemez. |
+| `docs/PRODUCT-DNA.md` | evet sayılır | Ürünün ne olduğu ve **olmadığı**. Mimar denetimi bu dosyadaki kabul ölçütlerine bakıyor; yoksa "duyu" denetimi dayanaksız kalır. |
+| `CONTEXT.md` | önerilir | Kavram sözlüğü. Aynı kavramın dört ajanda dört adı olmasın diye; şartnameyi bir model yazıyor, ikisi denetliyor, biri kodluyor. |
+
+#### `docs/ROADMAP.md` biçim kısıtları
+
+`roadmap-keeper` bu dosyayı ayrıştırıyor. Üç şey birebir olmalı:
+
+**1. Yol tam olarak `docs/ROADMAP.md`.** Bekçi başka yere bakmaz.
+
+**2. Tamamlanacak maddeler şu biçimde:**
+
+```markdown
+- ⏳ Kullanıcı davet koduyla kasaya katılabilir (#42)
+```
+
+Bir PR `Closes #42` yazarak birleştiğinde bekçi o satırı bulup `⏳`yi `✅`
+yapıyor. Aradığı kalıp `^- ⏳.*#42` — yani satır `- ⏳` ile başlamalı ve
+issue numarası `#42` olarak geçmeli. Başka bir işaret (`- [ ]`, `* ⏳`)
+kullanırsanız bekçi hiçbir şey bulamaz ve **hata da vermez**.
+
+**3. Sabit kararlar bölümü:**
+
+```markdown
+## Sabit kararlar
+
+| Karar | Gerekçe |
 |---|---|
-| `.github/workflows/ci.yml` | projenin derleme ve test komutları |
-| `CLAUDE.md` | projenin kuralları, doğrulama komutları, tuzakları |
-| `docs/PRODUCT-DNA.md` | ürünün ne olduğu ve olmadığı |
-| `docs/ROADMAP.md` | fazlar — `roadmap-keeper` bunu PR'ların `Closes #N` atfından günceller |
-| `CONTEXT.md` | kavram sözlüğü; aynı kavramın dört ajanda dört adı olmasın diye |
+| Para kuruş cinsinden tam sayı | Kayan noktalı para aritmetiği bütçede kabul edilemez |
+```
+
+Başlık birebir `## Sabit kararlar` olmalı ve altında bir markdown tablosu
+bulunmalı. PR gövdesinde `harita: sabit-karar | <karar> | <gerekçe>` satırı
+görürse bekçi yeni satırı bu tablonun sonuna ekliyor.
+
+Kapanmış fazları ayrı bir dosyaya taşıyacaksanız (`docs/ROADMAP-ARCHIVE.md`
+gibi) bekçi oraya bakmaz — arşiv tamamen sizin düzeniniz.
 
 ### 3. `pr-check` içindeki `DUYU_KALIP`
 

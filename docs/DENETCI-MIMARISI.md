@@ -46,9 +46,14 @@ prompt'tan bakmasıdır**. Bu depoda bağımsızlık üç ayrı katmanda kuruluy
 
 Bağımsızlık sonsuza kadar ölçeklenmez ve üç yerde biter:
 
-1. **Aynı diff, aynı çerçeve.** Her denetçi aynı kesilmiş diff'i, aynı `-U15`
+1. **Aynı diff, aynı çerçeve.** Her denetçi aynı diff'i, aynı `-U15`
    bağlamıyla okuyor. Diff'in dışında kalan kusur hiçbirine görünmez. Beş
    denetçi eklemek bu sınırı hiç oynatmaz.
+
+   Bu sınırın bir zamanlar çok daha dar bir hâli vardı ve **kaldırıldı**:
+   denetçiler diff'in yalnız ilk 12 KB'ını okuyordu. 12 Eylül 2026'da NVIDIA
+   kolu bölmeye geçti (aşağıda). Claude kolu (`denetci.yml`) hâlâ kesiyor;
+   elle çağrıldığı için acele değil, ama aynı ölçüm oraya da taşınmalı.
 2. **Mutabakat kanıt değildir.** Üç denetçi aynı şeyi söylediğinde bu üç kez
    doğrulanmış bir bulgu değil, tek bir korelasyondur: hepsi aynı bariz
    satıra bakmıştır. Denetçi sayısı bulgu **kapsamını** genişletir, bulgunun
@@ -119,6 +124,90 @@ görüşü yazan iki göz ayrı bir model ailesinde koşuyor.
   engellemeyeceği — 6. bölümdeki karşılaştırmayı bekliyor. Anahtar koşuda
   yoksa (secret tanımsız, ya da PR bir fork'tan geliyor) kol `failure` yazıp
   PR'a not düşüyor: yeşil bir tik değil, açıkça hükümsüzlük.
+
+### Bölme: denetimin kapsamı
+
+**Ölçülen arıza.** `denetci-nvidia.yml` diff'in ilk 12 KB'ını okuyup gerisini
+atıyordu. #741'de fark 143 KB'tı ve denetlenen 11.924 bayttı — **%8,3**. PR
+yeşil hüküm aldı. Yeşil tik "bu kodu okudum, kusur bulmadım" demek; orada
+söylediği şey "bu kodun on ikide birini okudum" idi, ve aradaki fark yorumun
+dibindeki tek satırlık bir nota gömülüydü.
+
+**12 KB'lık duvar kaldırılamıyor.** Ölçüldü: 12.000 baytlık dilim tamamlanıyor
+(165 sn, 6.740 çıktı token); 24.589 baytlık dilimde uç nokta **hiç cevap
+vermiyor** — iki denemede de boş yanıt, bağlantı beş dakika sonra cevapsız
+kapanıyor. Yani arıza "tavan yetmiyor" değil ve tavanı yükseltmek açmıyor.
+
+**Çözüm duvara birden çok kez çarpmak.** Fark 12 KB'lık dilimlere bölünüyor,
+her dilim ayrı bir çağrıyla denetleniyor, bulgular sonda birleştiriliyor.
+Kesim yeri rastgele değil: bayt sınırından kesmek bir hunk'ı ikiye bölerdi ve
+yarım hunk denetlenemez — bağlam satırları bir tarafta, değişiklik öbür
+tarafta kalır.
+
+| kesim yeri | ne zaman | ne olur |
+|---|---|---|
+| dosya (`diff --git`) | varsayılan | başlık her dilimde yeniden yazılır |
+| hunk (`@@`) | dosya tek dilime sığmıyorsa | hunk bütün kalır |
+| satır | **tek bir hunk 12 KB'tan uzunsa** | `[PARCA n/m]` işaretiyle bölünür |
+
+Üçüncü satır ölçümle girdi: bütün bir dosyayı yeniden yazan bir değişiklik
+`-U15` altında **tek hunk** üretiyor ve o hunk 64 KB olabiliyor. Hunk sınırı
+orada kesmiyor. 985 KB'lık gerçek bir fark üzerinde sınandı: 104 dilim, hiçbiri
+tavanı aşmıyor, ve kaynaktaki **sıfır** satır kayboluyor.
+
+**Canlı ölçüm (12 Eylül 2026, Vault PR #764).** 131.423 baytlık gerçek ve çok
+dosyalı bir fark üzerinde: **14 dilim, 14'ü de hüküm verdi**, toplam ~15 dakika
+(≈50 sn/dilim), 76 bulgu. Eski davranış aynı farkın ilk 11.924 baytını okurdu —
+**%9,1**.
+
+İki sayı buradan düzeltildi: dilim başına süre, dosyanın kendi yorumundaki 165
+sn'lik eski ölçümün **üçte biri** çıktı. Yani 20 dilimlik bir denetim ~17 dakika,
+`SURE_TAVAN`ın (45 dk) çok altında — iki kelepçeden **dilim tavanı** önce bağlıyor
+ve bu doğru sıra: belirlenimci kelepçe `success` + kapsam yazıyor, rastlantısal
+olan `error`. Ters sırada olsaydı büyük bir PR süre aşımına düşüp sürekli
+beklemeye girerdi.
+
+Bulgu kalitesi de aynı koşuda görüldü: sınama dalı punto jetonlarının
+(`text-body`, `text-note`) keyfi piksel değerleriyle ezildiği eski sürümü geri
+koyuyordu ve denetçi tam o ihlali yakaladı — o ölçek `punto-skalasi.test.ts` ile
+donmuş durumda.
+
+**İki kelepçe var ve ikisi ayrı şeyi ölçüyor.**
+
+| kelepçe | değer | aşılırsa |
+|---|---|---|
+| `DILIM_TAVAN` | 20 dilim (≈240 KB) | `success`, ama okunmayan dosyalar **adlarıyla** yazılır |
+| `SURE_TAVAN` | 2700 sn | `error` — yeniden çalıştırmak açabilir |
+
+Ayrım şu soruya göre: **yeniden çalıştırmak düzeltir mi?** Dilim tavanı
+belirlenimci — 32 dilimlik bir fark yarın da 32 dilim olacak, `error` yazmak o
+PR'ı sonsuza kadar bekletirdi ve büyük PR hiç birleşemezdi. Süre aşımı ve düşen
+dilim rastlantısal — sağlayıcı hıçkırdı, aynı koşu yarın tamamlanabilir.
+
+**Hüküm sırası:** engel her şeyin önünde. Bir dilimde gösterilmiş kusur, öteki
+dilimlerin okunup okunmadığından bağımsız olarak kusurdur.
+
+**Bölme kısmi görüş arızasını kapatmıyor, çoğaltıyor.** Ölçülmüştü (1–2 Eylül,
+üç PR, sekiz bulgu): #644'te 3 bulgunun 1'i, #647'de 5'in 2'si, #652'de 5'in
+**5'i** modelin görmediği yer hakkında yazılmıştı ve `ENGEL` hükmüne dönüşüp
+yeşil PR'ları kilitlemişti. Eskiden kısmi görüş yalnız tavan aşıldığında vardı;
+şimdi birden çok dilim üretilen **her** koşuda var. O yüzden "görmediğin yer
+hakkında bulgu yazma" talimatı artık her dilimin prompt'unda duruyor, ve
+`[PARCA]` işaretinin farkın kendi metni olmadığı ayrıca açıklanıyor — bu model
+tam olarak böyle bir satıra "sözdizimi hatası" dediği için (#593).
+
+**Bölmenin ödediği bedel: çerçeve her dilimde yeniden gönderiliyor.** Prompt'un
+fark dışındaki payı — `CLAUDE.md`'nin ilk 200 satırı artı PR açıklaması — dilim
+başına ~15 KB ve 14 dilimlik bir denetimde 14 kez gidiyor. Bu bilerek böyle:
+kuralları sonraki dilimlerden çıkarmak, dilimleri **farklı ölçütlere göre**
+yargılamak olurdu ve karşılaştırılamaz hükümler üretirdi. Ücretsiz uç noktada
+bedel sıfır; Bitdeer fiyatıyla 14 dilimlik bir denetim ~0,08 $ — tekil PR
+denetiminin hâlâ yirmide biri.
+
+**Kapsam üç yere birden yazılıyor:** PR yorumu, koşu özeti, ve commit durumunun
+açıklaması (`Denetlendi 18/20 dilim — engel yok`). Üçü tek yerden kuruluyor;
+ayrı kurulsalardı biri bir gün ötekilerden farklı bir şey söylerdi, ve kapıya
+bakan kişi çoğunlukla yalnız üçüncüsünü görüyor.
 
 ### Ölçülen NVIDIA uç noktası
 

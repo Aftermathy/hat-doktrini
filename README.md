@@ -95,10 +95,22 @@ Biri eksikse o yol sessizce kapalı kalır.
 
 ## Burada olmayan, projede kalan
 
-- `ci.yml` — projenin kendi derleme ve test komutları
-- `CLAUDE.md` — projenin kuralları ve tuzakları
-- `PRODUCT-DNA.md`, `ROADMAP.md`, `CONTEXT.md`
-- `pr-check` içindeki `DUYU_KALIP` gibi projeye özgü ayarlar
+Bu dosyalar **her projede sıfırdan yazılır**; buradan kopyalanmaz ve başka bir
+projeden de alınmaz. Kopyalanan bir `CLAUDE.md`, ajanlara var olmayan bir
+projeyi öğretir.
+
+| Dosya | Ne |
+|---|---|
+| `.github/workflows/ci.yml` | projenin derleme, lint ve test komutları |
+| `CLAUDE.md` | projenin kuralları, doğrulama komutları, tuzakları |
+| `docs/ROADMAP.md` | fazlar ve sabit kararlar — **biçim kısıtlı**, bkz. KURULUM.md |
+| `docs/PRODUCT-DNA.md` | ürünün ne olduğu ve olmadığı; mimar denetimi buna bakar |
+| `CONTEXT.md` | kavram sözlüğü |
+| `pr-check`'teki `DUYU_KALIP` | mimarın hangi dosyalarda çağrılacağı |
+
+`docs/ROADMAP.md`'nin biçimi `roadmap-keeper` tarafından ayrıştırılıyor:
+maddeler `- ⏳ … (#N)` biçiminde olmalı ve `## Sabit kararlar` başlığı birebir
+yazılmalı. Uyulmazsa bekçi hiçbir şey işaretlemez **ve hata da vermez**.
 
 ## Doktrin
 
