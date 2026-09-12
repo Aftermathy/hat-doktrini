@@ -155,6 +155,23 @@ tarafta kalır.
 orada kesmiyor. 985 KB'lık gerçek bir fark üzerinde sınandı: 104 dilim, hiçbiri
 tavanı aşmıyor, ve kaynaktaki **sıfır** satır kayboluyor.
 
+**Canlı ölçüm (12 Eylül 2026, Vault PR #764).** 131.423 baytlık gerçek ve çok
+dosyalı bir fark üzerinde: **14 dilim, 14'ü de hüküm verdi**, toplam ~15 dakika
+(≈50 sn/dilim), 76 bulgu. Eski davranış aynı farkın ilk 11.924 baytını okurdu —
+**%9,1**.
+
+İki sayı buradan düzeltildi: dilim başına süre, dosyanın kendi yorumundaki 165
+sn'lik eski ölçümün **üçte biri** çıktı. Yani 20 dilimlik bir denetim ~17 dakika,
+`SURE_TAVAN`ın (45 dk) çok altında — iki kelepçeden **dilim tavanı** önce bağlıyor
+ve bu doğru sıra: belirlenimci kelepçe `success` + kapsam yazıyor, rastlantısal
+olan `error`. Ters sırada olsaydı büyük bir PR süre aşımına düşüp sürekli
+beklemeye girerdi.
+
+Bulgu kalitesi de aynı koşuda görüldü: sınama dalı punto jetonlarının
+(`text-body`, `text-note`) keyfi piksel değerleriyle ezildiği eski sürümü geri
+koyuyordu ve denetçi tam o ihlali yakaladı — o ölçek `punto-skalasi.test.ts` ile
+donmuş durumda.
+
 **İki kelepçe var ve ikisi ayrı şeyi ölçüyor.**
 
 | kelepçe | değer | aşılırsa |
