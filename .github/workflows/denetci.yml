@@ -34,7 +34,7 @@ on:
     inputs:
       pr:
         description: "PR numarası"
-        required: true
+        required: false
         type: string
 
 permissions:

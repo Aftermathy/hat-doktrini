@@ -18,7 +18,7 @@ on:
     inputs:
       issue:
         description: "Şartnameye çevrilecek issue numarası"
-        required: true
+        required: false
         type: string
 
 concurrency:

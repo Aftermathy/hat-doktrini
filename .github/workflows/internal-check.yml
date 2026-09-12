@@ -21,7 +21,7 @@ on:
     inputs:
       issue:
         description: "Denetlenecek issue numarası"
-        required: true
+        required: false
         type: string
 
 permissions:

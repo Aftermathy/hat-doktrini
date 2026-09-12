@@ -20,7 +20,12 @@ on:
     inputs:
       pr:
         description: "Denetlenecek PR numarası"
-        required: true
+        # `required: false` ve bu şart: sarmalayıcı bu dosyayı hem
+        # `workflow_dispatch` (girdi dolu) hem `pull_request` (girdi **boş**)
+        # olayında çağırıyor. `required: true` olsaydı ikinci durumda çağrı
+        # hiç çözümlenmez, iş başlamadan düşerdi. Kod zaten boşluğu bekliyor:
+        # aşağıda her yerde `inputs.pr || github.event.pull_request.number`.
+        required: false
         type: string
 
 permissions:
