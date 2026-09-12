@@ -157,20 +157,40 @@ jobs:
           # Kalıp bu dosyada GÖMÜLÜ DEĞİL: `SINIF: GENEL` bir dosyada Vault'un
           # iOS yolları duruyordu ve merkeze taşındıktan sonra tüketici proje
           # onu değiştiremiyordu — KURULUM.md "pr-check içinde yazın" diyordu
-          # ama projede yalnız sarmalayıcı var. Depo değişkeni `DUYU_KALIP`
-          # tanımsızsa aşağıdaki Vault kalıbı kalır: tarihsel varsayılan, yeni
-          # projede değişkeni kurmayan mimarı yanlış dosyalarda çağırır; o
-          # yüzden uyarı basılır.
-          VARSAYILAN_KALIP='^\+\+\+ b/(src/|ios/App/VaultWidget/|ios/App/VaultNotificationService/|ios/App/App/VaultIntents\.swift|.*\.css$|tailwind\.config)'
+          # ama projede yalnız sarmalayıcı var. Kalıp depo değişkeni
+          # `DUYU_KALIP`'ten gelir; tanımsızsa GENEL varsayılan kalır (web
+          # arayüzü) ve uyarı basılır. Native yolları olan proje (Vault'un
+          # iOS hedefleri gibi) kalıbı kendi değişkenine yazar — merkezde tek
+          # bir proje adı durmaz.
+          VARSAYILAN_KALIP='^\+\+\+ b/(src/|.*\.css$|tailwind\.config)'
           DUYU_KALIP="${DUYU_KALIP_VAR:-$VARSAYILAN_KALIP}"
           if [ -z "${DUYU_KALIP_VAR:-}" ]; then
-            echo "UYARI: depo değişkeni DUYU_KALIP tanımsız — Vault'un kalıbı kullanılıyor: $DUYU_KALIP" >&2
+            echo "UYARI: depo değişkeni DUYU_KALIP tanımsız — genel kalıp kullanılıyor: $DUYU_KALIP" >&2
           fi
-          if [ -s pr.diff ] && grep -qE "$DUYU_KALIP" pr.diff; then DUYU=true; fi
+          # Kalıp artık dışarıdan yazılıyor, yani bozuk gelebilir. `grep -E`
+          # geçersiz ifadede 2 döner ve `if` onu "eşleşme yok" sayardı: mimar
+          # sessizce atlanır, PR'a da "dokunan dosya yok" diye yanlış bir
+          # cümle düşerdi. Bozuk kalıp kaza; kazanın bedeli bir mimar çağrısı
+          # olmalı, kaçırılmış bir denetim değil — açık tarafa düşülür.
+          # Boş girdide geçerli kalıp 1 (eşleşme yok), geçersiz kalıp 2 döner.
+          # Ölçüldü: ^\+\+\+ b/(src/|.*\.css$) → 1 · ^\+\+\+ b/(src/[ → 2
+          printf '' | grep -qE "$DUYU_KALIP" 2>/dev/null
+          KALIP_SONUC=$?
+          KALIP_BOZUK=0
+          if [ "$KALIP_SONUC" -gt 1 ]; then
+            echo "UYARI: DUYU_KALIP geçersiz düzenli ifade — mimar çağrılıyor: $DUYU_KALIP" >&2
+            KALIP_BOZUK=1
+            DUYU=true
+          elif [ -s pr.diff ] && grep -qE "$DUYU_KALIP" pr.diff; then
+            DUYU=true
+          fi
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "mimar=false" >> "$GITHUB_OUTPUT"
           elif [ "$DUYU" = "true" ]; then
             echo "mimar=true" >> "$GITHUB_OUTPUT"
+            if [ "$KALIP_BOZUK" = "1" ] && ! gh pr view "$NUM" --json comments --jq '.comments[].body' | grep -q '^\*\*DUYU_KALIP bozuk'; then
+              gh pr comment "$NUM" --body "**DUYU_KALIP bozuk:** depo değişkenindeki düzenli ifade geçerli değil (\`${DUYU_KALIP}\`); fark denetlenmeden kalmasın diye mimar yine de çağrıldı. Değişkeni düzeltin." >/dev/null 2>&1 || true
+            fi
           else
             echo "mimar=false" >> "$GITHUB_OUTPUT"
             DEGISEN=$(grep -oE '^\+\+\+ b/[^ ]+' pr.diff | sed 's|^+++ b/||' | head -12 | tr '\n' ' ')
