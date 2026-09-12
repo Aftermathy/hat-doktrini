@@ -179,6 +179,14 @@ hakkında bulgu yazma" talimatı artık her dilimin prompt'unda duruyor, ve
 `[PARCA]` işaretinin farkın kendi metni olmadığı ayrıca açıklanıyor — bu model
 tam olarak böyle bir satıra "sözdizimi hatası" dediği için (#593).
 
+**Bölmenin ödediği bedel: çerçeve her dilimde yeniden gönderiliyor.** Prompt'un
+fark dışındaki payı — `CLAUDE.md`'nin ilk 200 satırı artı PR açıklaması — dilim
+başına ~15 KB ve 14 dilimlik bir denetimde 14 kez gidiyor. Bu bilerek böyle:
+kuralları sonraki dilimlerden çıkarmak, dilimleri **farklı ölçütlere göre**
+yargılamak olurdu ve karşılaştırılamaz hükümler üretirdi. Ücretsiz uç noktada
+bedel sıfır; Bitdeer fiyatıyla 14 dilimlik bir denetim ~0,08 $ — tekil PR
+denetiminin hâlâ yirmide biri.
+
 **Kapsam üç yere birden yazılıyor:** PR yorumu, koşu özeti, ve commit durumunun
 açıklaması (`Denetlendi 18/20 dilim — engel yok`). Üçü tek yerden kuruluyor;
 ayrı kurulsalardı biri bir gün ötekilerden farklı bir şey söylerdi, ve kapıya
