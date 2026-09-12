@@ -14,7 +14,19 @@ gidiyordu: bir projede düzeltilen arıza ötekilerde duruyor, bir projede
 
 Artık tek kopya burada. Projeler `workflow_call` ile çağırıyor.
 
-## Nasıl kullanılır
+## Yeni projeye kurmak
+
+Tek komut — hedef projenin kökünde:
+
+```sh
+curl -sL https://raw.githubusercontent.com/Aftermathy/hat-doktrini/v1/tools/kur.sh | bash
+```
+
+Ayrıntı ve elle yapılacaklar: **[KURULUM.md](KURULUM.md)**.
+Claude Code oturumuna doğrudan "bu deponun `KURULUM.md`'sini oku ve hattı kur"
+demek de yeterli.
+
+## Nasıl çalışır
 
 Projede ince bir sarmalayıcı durur; tetikleyici orada, iş burada:
 

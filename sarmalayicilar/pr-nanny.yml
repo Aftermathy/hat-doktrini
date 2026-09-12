@@ -1,0 +1,50 @@
+# Sarmalayıcı — iş `Aftermathy/hat-doktrini`de.
+#
+# Bu dosya `hat-doktrini/sarmalayicilar/` altından kopyalandı.
+#
+# Bu dosya yalnız tetikleyiciyi ve izinleri taşıyor; iş akışının kendisi
+# merkezde ve birden çok proje onu paylaşıyor. Merkez değişince buraya
+# dokunmak gerekmiyor — sürüm etiketi (`@v1`) yükseltilene kadar bu proje
+# aynı sürümde kalıyor.
+#
+# Tetikleyici burada durmak zorunda: GitHub `workflow_call` ile çağrılan
+# dosyanın kendi tetikleyicisini okumuyor.
+name: PR bakıcısı
+
+on:
+  # `pull_request` olayları YALNIZCA okuyan `inceleme` işini koşturuyor;
+  # aşağıdaki `bakim` işi bu olayda bilerek atlanıyor ve o sınır korunuyor
+  # (gerekçesi işin başında yazılı).
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  # Yazan işi besleyen güvenli olay. CI bittiğinde bakıcının yapacak işi
+  # doğuyor — denetçi hükmü okunabilir hâle geliyor, çakışma görünüyor.
+  # `workflow_run` iş akışı dosyasını **varsayılan daldan** koşturuyor, yani
+  # `bakim`in yazma kapsamını veren şart (depoda zaten duran dosya) bu olayda
+  # da sağlanıyor; `pull_request`te sağlanmadığı için o kapalı kalıyor.
+  # Döngü riski yok: bakıcı CI'yı tetiklemiyor, CI push ile koşuyor.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+# Kapsam işe göre veriliyor, iş akışına göre değil. Blok yazılmayan kapsamı
+# kapattığı için buradaki boş blok da bir karardır: hiçbir iş, yazmadığı
+# kapsamı devralmıyor.
+
+concurrency:
+  group: pr-nanny-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: read
+
+jobs:
+  cagir:
+    uses: Aftermathy/hat-doktrini/.github/workflows/pr-nanny.yml@v1
+    secrets: inherit

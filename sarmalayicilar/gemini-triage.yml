@@ -1,0 +1,48 @@
+# Sarmalayıcı — iş `Aftermathy/hat-doktrini`de.
+#
+# Bu dosya `hat-doktrini/sarmalayicilar/` altından kopyalandı.
+#
+# Bu dosya yalnız tetikleyiciyi ve izinleri taşıyor; iş akışının kendisi
+# merkezde ve birden çok proje onu paylaşıyor. Merkez değişince buraya
+# dokunmak gerekmiyor — sürüm etiketi (`@v1`) yükseltilene kadar bu proje
+# aynı sürümde kalıyor.
+#
+# Tetikleyici burada durmak zorunda: GitHub `workflow_call` ile çağrılan
+# dosyanın kendi tetikleyicisini okumuyor.
+name: Gemini triyaj
+
+on:
+  issues:
+    types: [labeled]
+  # Botun koyduğu etiket olay doğurmaz; süpürücü bu kapıdan iter.
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "Şartnameye çevrilecek issue numarası"
+        required: true
+
+# Eşzamanlılık **issue başına**, hat başına DEĞİL.
+#
+# 2026-08-19'da hat başına tek grup denendi ve ters tepti: GitHub bir
+# eşzamanlılık grubunda yalnızca **bir** bekleyen koşu tutar; yenisi gelince
+# önceki bekleyeni iptal eder. Yani grup işleri sıraya sokmuyor, düşürüyor —
+# sekiz dispatch'ten biri koştu, biri bekledi, altısı sessizce atlandı.
+#
+# Kalabalık çağrıya karşı savunma burada değil: `llm.sh` 429'da üç kez
+# geri çekiliyor, süpürücü düşen koşuyu bir kez yeniden deniyor.
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+
+concurrency:
+  group: gemini-triyaj-${{ inputs.issue || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  cagir:
+    uses: Aftermathy/hat-doktrini/.github/workflows/gemini-triage.yml@v1
+    with:
+      issue: ${{ inputs.issue }}
+    secrets: inherit

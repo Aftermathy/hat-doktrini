@@ -1,0 +1,52 @@
+# Sarmalayıcı — iş `Aftermathy/hat-doktrini`de.
+#
+# Bu dosya `hat-doktrini/sarmalayicilar/` altından kopyalandı.
+#
+# Bu dosya yalnız tetikleyiciyi ve izinleri taşıyor; iş akışının kendisi
+# merkezde ve birden çok proje onu paylaşıyor. Merkez değişince buraya
+# dokunmak gerekmiyor — sürüm etiketi (`@v1`) yükseltilene kadar bu proje
+# aynı sürümde kalıyor.
+#
+# Tetikleyici burada durmak zorunda: GitHub `workflow_call` ile çağrılan
+# dosyanın kendi tetikleyicisini okumuyor.
+name: Denetçi (NVIDIA)
+
+on:
+  # `synchronize` YOK ve bu bir eksiklik değil, karar.
+  #
+  # Bu depoda kota yakan döngü iki kez yaşandı ve ilkinin suçlusu doğrudan
+  # `synchronize` idi: iki saatte 41 koşu. Hattın mühendisi bir PR'a arka
+  # arkaya push ediyor ve her push tam bedelli bir denetim doğuruyor. Uç
+  # noktanın bugün ücretsiz olması bunu güvenli yapmıyor — ücretsiz katmanın
+  # kendi sınırı var ve onu yakan şey de aynı desen olurdu; üstelik sınıra
+  # çarpıldığı an bu denetçi sessizce susan bir denetçiye dönüşür.
+  #
+  # `denetci.yml` hiç otomatik tetikleyici almıyor çünkü orada bedel para.
+  # Burada bedel para değil, o yüzden PR **açılışında** koşuyor: iki haftalık
+  # karşılaştırmanın anlamlı olması için denetimin insana bağlı olmaması
+  # gerekiyor. Elle çağrılan bir denetçinin CodeRabbit ile karşılaştırılması,
+  # iki modeli değil iki çağrı sıklığını karşılaştırmak olurdu.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR numarası'
+        required: true
+  pull_request:
+    types: [opened, ready_for_review, reopened]
+
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: denetci-nvidia-${{ github.event.pull_request.number || github.event.inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  cagir:
+    uses: Aftermathy/hat-doktrini/.github/workflows/denetci-nvidia.yml@v1
+    with:
+      pr: ${{ inputs.pr }}
+    secrets: inherit

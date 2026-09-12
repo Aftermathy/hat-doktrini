@@ -1,0 +1,46 @@
+# Sarmalayıcı — iş `Aftermathy/hat-doktrini`de.
+#
+# Bu dosya `hat-doktrini/sarmalayicilar/` altından kopyalandı.
+#
+# Bu dosya yalnız tetikleyiciyi ve izinleri taşıyor; iş akışının kendisi
+# merkezde ve birden çok proje onu paylaşıyor. Merkez değişince buraya
+# dokunmak gerekmiyor — sürüm etiketi (`@v1`) yükseltilene kadar bu proje
+# aynı sürümde kalıyor.
+#
+# Tetikleyici burada durmak zorunda: GitHub `workflow_call` ile çağrılan
+# dosyanın kendi tetikleyicisini okumuyor.
+name: PR iç kontrol
+
+on:
+  # `synchronize` bilerek YOK: mühendis bir PR'a düzeltme push ettikçe aynı
+  # diff baştan denetlenir ve maliyet PR başına onlarca kez tekrarlanır.
+  # Denetim PR'ın açılışında ve incelemeye çıkışında bir kez yapılır; sonraki
+  # push'lardaki bulguları denetçi (CodeRabbit) zaten takip eder.
+  # `opened` de yok: mühendis PR'ları taslak açıyor ve CI yeşilken incelemeye
+  # çıkarıyor. Taslakta denetim, henüz bitmemiş işi okumak ve aynı diff'i iki
+  # kez ödemektir. Tek kapı: incelemeye çıkış.
+  pull_request:
+    types: [ready_for_review]
+  # Kurtarma yolu: denetim yarım kalırsa (bkz. #245) ya da hiç koşmazsa
+  # PR'ı yeniden açıp kapatmak gerekmesin. Kapı elle yeniden açılabilmeli.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Denetlenecek PR numarası"
+        required: true
+
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-check-${{ inputs.pr || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cagir:
+    uses: Aftermathy/hat-doktrini/.github/workflows/pr-check.yml@v1
+    with:
+      pr: ${{ inputs.pr }}
+    secrets: inherit

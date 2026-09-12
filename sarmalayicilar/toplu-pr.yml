@@ -1,0 +1,43 @@
+# Sarmalayıcı — iş `Aftermathy/hat-doktrini`de.
+#
+# Bu dosya `hat-doktrini/sarmalayicilar/` altından kopyalandı.
+#
+# Bu dosya yalnız tetikleyiciyi ve izinleri taşıyor; iş akışının kendisi
+# merkezde ve birden çok proje onu paylaşıyor. Merkez değişince buraya
+# dokunmak gerekmiyor — sürüm etiketi (`@v1`) yükseltilene kadar bu proje
+# aynı sürümde kalıyor.
+#
+# Tetikleyici burada durmak zorunda: GitHub `workflow_call` ile çağrılan
+# dosyanın kendi tetikleyicisini okumuyor.
+name: Toplu sunum PR
+
+on:
+  schedule:
+    # Saat başı bakılır ama tur her seferinde açılmaz: cron sabit, pencere
+    # değişken. Aralığı depo değişkeninden okuyabilmenin tek yolu, sık bakıp
+    # kapıda karar vermek.
+    - cron: '20 * * * *'
+  # Birleşen bir PR yeni bir turun vaktini getirebilir; zamanlama bastırılırken
+  # (#525) bu olay turu beklemekten kurtarıyor. Pencere kapısı yerinde durduğu
+  # için erken uyanmak tur açmıyor, yalnız kapıya bakıyor.
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+
+
+concurrency:
+  group: toplu-pr
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  checks: read
+  contents: write
+  issues: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cagir:
+    uses: Aftermathy/hat-doktrini/.github/workflows/toplu-pr.yml@v1
+    secrets: inherit
