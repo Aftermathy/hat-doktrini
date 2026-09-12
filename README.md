@@ -88,10 +88,15 @@ doğurmaz. Süresini uzun verin; dolduğunda hat sessizce durur.
 | `GEMINI_MODEL` | `gemini-3.6-flash` |
 | `NVIDIA_ARCHITECT_MODEL` | `deepseek-ai/deepseek-v4-pro-0813` |
 | `TOPLU_ARALIK_SAAT` | `4` |
+| `DUYU_KALIP` | projenin arayüz dosyaları, örn. `^\+\+\+ b/(src/\|.*\.css$)` — mimarın çağrılacağı fark |
 
 **Etiketler:** `agent-ready`, `internal-check`, `needs-approval`, `kusurlu`,
-`taslak`, `lokal`, `sende`, `needs-device`, `gemini`, `toplu`, `acil`.
-Biri eksikse o yol sessizce kapalı kalır.
+`taslak`, `lokal`, `sende`, `needs-device`, `gemini`, `toplu`,
+`sunuma-girmez`, `acil`. Biri eksikse o yol sessizce kapalı kalır.
+
+**Depo ayarları:** yalnız merge commit açık (squash ve rebase kapalı), dal
+otomatik silinir, Actions PR açabilir. `kur.sh` yazar; gerekçe
+`KURULUM.md` §4.
 
 ## Burada olmayan, projede kalan
 
@@ -105,12 +110,20 @@ projeyi öğretir.
 | `CLAUDE.md` | projenin kuralları, doğrulama komutları, tuzakları |
 | `docs/ROADMAP.md` | fazlar ve sabit kararlar — **biçim kısıtlı**, bkz. KURULUM.md |
 | `docs/PRODUCT-DNA.md` | ürünün ne olduğu ve olmadığı; mimar denetimi buna bakar |
+| `docs/roles/mimar.md` | mimarın talimatı; yoksa mimar hüküm vermez |
 | `CONTEXT.md` | kavram sözlüğü |
-| `pr-check`'teki `DUYU_KALIP` | mimarın hangi dosyalarda çağrılacağı |
+| `.agentrc` | kaynak dökümünün yolları |
+| `DUYU_KALIP` depo değişkeni | mimarın hangi dosyalarda çağrılacağı |
 
 `docs/ROADMAP.md`'nin biçimi `roadmap-keeper` tarafından ayrıştırılıyor:
 maddeler `- ⏳ … (#N)` biçiminde olmalı ve `## Sabit kararlar` başlığı birebir
 yazılmalı. Uyulmazsa bekçi hiçbir şey işaretlemez **ve hata da vermez**.
+
+## Burada olup projeye kopyalanan
+
+- `.claude/skills/` — yerel ajanın skill'leri (`sorgulama`, `prototip`,
+  `sartname-uyumu`, `prompt-butcesi`, …); `kur.sh` kopyalar. Merkezde
+  değişirse `kur.sh` yeniden koşturulur.
 
 ## Doktrin
 
