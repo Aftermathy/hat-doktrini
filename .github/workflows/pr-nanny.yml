@@ -35,11 +35,15 @@ permissions: {}
 # `run_id` yedeği takvim ve `workflow_dispatch` kollarında devreye giriyor;
 # orada PR bağlamı yok ve her koşunun kendi grubunda olması zararsız — o
 # kollar zaten tekrar tekrar koşuyor.
-concurrency:
-  group: pr-nanny-${{ github.event.pull_request.number || github.run_id }}
-  # Yarım kalan bir bakım turu hiç koşmamış turdan kötüdür: damga
-  # `durum:basladi`de asılı kalır ve PR bir sonraki tura kadar sahipsiz görünür.
-  cancel-in-progress: false
+# **Eşzamanlılık burada değil, çağıranda.**
+#
+# Grup adı iki tarafta da aynı olduğunda çağıran grubu tutuyor, çağrılan
+# aynı grubu istiyor ve kendi kendini bekleyip düşüyor — iş hiç başlamıyor,
+# job listesi boş kalıyor ve hata mesajı da görünmüyor. Ölçüldü (12 Eylül,
+# `maliyet` ve `pr-check` koşularında); eşzamanlılığı yalnız sarmalayıcıda
+# bırakmak sorunu kapatıyor.
+#
+# Doğrusu da bu: aynı anda kaç tur koşacağı çağıran projenin kararı.
 
 env:
   # İşaret tek yerde tanımlı, çünkü aranan satır ile yazılan satır ayrı ayrı

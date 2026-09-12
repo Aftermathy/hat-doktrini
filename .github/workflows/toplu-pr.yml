@@ -47,9 +47,15 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: toplu-pr
-  cancel-in-progress: false
+# **Eşzamanlılık burada değil, çağıranda.**
+#
+# Grup adı iki tarafta da aynı olduğunda çağıran grubu tutuyor, çağrılan
+# aynı grubu istiyor ve kendi kendini bekleyip düşüyor — iş hiç başlamıyor,
+# job listesi boş kalıyor ve hata mesajı da görünmüyor. Ölçüldü (12 Eylül,
+# `maliyet` ve `pr-check` koşularında); eşzamanlılığı yalnız sarmalayıcıda
+# bırakmak sorunu kapatıyor.
+#
+# Doğrusu da bu: aynı anda kaç tur koşacağı çağıran projenin kararı.
 
 jobs:
   topla:

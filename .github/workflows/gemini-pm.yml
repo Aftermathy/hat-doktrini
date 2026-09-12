@@ -19,12 +19,15 @@ name: Gemini PM
 on:
   workflow_call:
 
-concurrency:
-  group: gemini-pm
-  # Mühendis bir turda 5 PR kapatıyor; her kapanış PM'i uyandırırsa aynı repo
-  # durumu için 5 kez tam analiz yapılır. Bekleyen koşu iptal edilir — en son
-  # tetiklenen zaten en güncel durumu görür.
-  cancel-in-progress: true
+# **Eşzamanlılık burada değil, çağıranda.**
+#
+# Grup adı iki tarafta da aynı olduğunda çağıran grubu tutuyor, çağrılan
+# aynı grubu istiyor ve kendi kendini bekleyip düşüyor — iş hiç başlamıyor,
+# job listesi boş kalıyor ve hata mesajı da görünmüyor. Ölçüldü (12 Eylül,
+# `maliyet` ve `pr-check` koşularında); eşzamanlılığı yalnız sarmalayıcıda
+# bırakmak sorunu kapatıyor.
+#
+# Doğrusu da bu: aynı anda kaç tur koşacağı çağıran projenin kararı.
 
 permissions:
   contents: read

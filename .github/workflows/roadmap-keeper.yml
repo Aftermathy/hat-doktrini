@@ -60,9 +60,15 @@ permissions:
 # hiç işlenmez. Ölçüldü (#495, 25 Ağustos 20:32): dört eşzamanlı koşunun ikisi
 # `cancelled` düştü. `docs/AGENT-WORKFLOW.md` bu tuzağı bekçiyi adıyla anarak
 # yazıyordu; düzeltme koda inmemişti.
-concurrency:
-  group: roadmap-keeper-${{ github.event.pull_request.number || inputs.pr || github.run_id }}
-  cancel-in-progress: false
+# **Eşzamanlılık burada değil, çağıranda.**
+#
+# Grup adı iki tarafta da aynı olduğunda çağıran grubu tutuyor, çağrılan
+# aynı grubu istiyor ve kendi kendini bekleyip düşüyor — iş hiç başlamıyor,
+# job listesi boş kalıyor ve hata mesajı da görünmüyor. Ölçüldü (12 Eylül,
+# `maliyet` ve `pr-check` koşularında); eşzamanlılığı yalnız sarmalayıcıda
+# bırakmak sorunu kapatıyor.
+#
+# Doğrusu da bu: aynı anda kaç tur koşacağı çağıran projenin kararı.
 
 jobs:
   keep:
