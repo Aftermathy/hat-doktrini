@@ -1,0 +1,346 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+name: Gemini sentez
+
+# İç kontrolün son adımı: mühendis ve mimar görüşlerini ürün yöneticisi tartar.
+# Haklı bulduğunu şartnameye işler, bulmadığını gerekçesiyle reddeder, işin
+# fazını/sırasını günceller ve issue'yu sahibin onayına çıkarır. agent-ready'yi
+# yine yalnızca sahip verir.
+
+# **Bu dosya merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici çağıran deponun sarmalayıcısında duruyor; burada yalnız iş var.
+# Sebebi tek kopya: bu hattı birden çok proje kullanıyor ve doktrin bir
+# projede değişip ötekilerde eskimemeli.
+#
+# Çağıran bağlam olduğu gibi korunuyor — `github.repository`, `github.event`,
+# `github.event_name`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar
+# hepsi **çağıran deponun** değerleri.
+on:
+  workflow_call:
+    inputs:
+      issue:
+        description: "Sentezlenecek issue numarası"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  # `gh workflow run` hem okuma hem yazma ister. Blok yazan, yazmadığı
+  # kapsamı kapatır: bu satır olmadan dispatch 403 alıyor ve `|| true`
+  # yüzünden koşu yeşil bitiyordu — zincirin halkası sessizce kopuyordu.
+  actions: write
+
+concurrency:
+  group: gemini-synthesis-${{ inputs.issue }}
+  cancel-in-progress: false
+
+jobs:
+  synthesize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Koşullar sağlam mı
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_FALLBACK_MODEL: ${{ vars.CLAUDE_FALLBACK_MODEL || 'claude-sonnet-5' }}
+          NUM: ${{ inputs.issue }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GEMINI_API_KEY" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "Hiçbir model anahtarı yok." >&2; echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # Çift tetiklenmeye karşı: etiket hâlâ internal-check değilse iş bitmiştir.
+          ETIKETLER=$(gh issue view "$NUM" --json labels --jq '[.labels[].name]')
+          if ! echo "$ETIKETLER" | jq -e 'index("internal-check")' >/dev/null; then
+            echo "Issue #$NUM iç kontrolde değil; sentez atlanıyor."
+            echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Görüşleri tart, şartnameyi karara bağla
+        if: steps.guard.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_FALLBACK_MODEL: ${{ vars.CLAUDE_FALLBACK_MODEL || 'claude-sonnet-5' }}
+          MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
+          NUM: ${{ inputs.issue }}
+        run: |
+          set -euo pipefail
+          gh issue view "$NUM" --json title --jq .title > raw_title.txt
+          gh issue view "$NUM" --json body --jq .body > raw_body.txt
+
+          # Parmak izi, `internal-check.yml`'deki kapının BİREBİR aynısı:
+          # başlık + gövde + yorumlardaki görsel adresleri. İki yer aynı
+          # dizeyi üretmek zorunda; biri değişip öteki değişmezse kapı her
+          # turda kapalı kalır ve arıza "denetçi hiç koşmuyor" gibi görünür.
+          {
+            gh issue view "$NUM" --json title,body --jq '.title, .body'
+            gh issue view "$NUM" --json comments --jq '.comments[].body' 2>/dev/null \
+              | grep -oE 'https://[^ )"]+\.(png|jpe?g|webp)' || true
+          } | sha256sum | cut -c1-16 > parmak.txt
+          PARMAK=$(cat parmak.txt)
+
+          # Her rolün YALNIZCA son görüşü, ve yalnızca ŞU ANKİ şartname
+          # sürümüne ait olanı. Bir issue birden çok kez denetime girebiliyor
+          # (denetim düştü, yeniden koştu, `kusurlu` ile revizyona döndü);
+          # tüm geçmişi okumak düzeltilmiş bir arızayı hâlâ duruyormuş gibi
+          # gösterir, yalnızca "son" yorumu okumak ise BAŞKA BİR SÜRÜMÜN
+          # denetimini bu sürümün onayı sanar.
+          #
+          # İkincisi ölçüldü (#628, 1 Eylül): revizyondan sonra sentez
+          # 23:31:02'de koştu ve "mühendis onay verdi (yorum yok)" dedi;
+          # andığı yorum 11:53'te, `54853c5d…` parmağıyla yazılmıştı. Bu
+          # sürümün (`c577f737…`) mühendis denetimi 79 saniye sonra düştü ve
+          # içinde beş bulgu vardı. Şartname o beş bulguyla birlikte onaya
+          # gitti.
+          #
+          # Parmak izi yalnızca BAŞARILI denetimin yorumuna basılıyor
+          # (`internal-check.yml`, "Yorumu bırak"), yani bu filtre "yarım
+          # kalmış denetim" halini de kendiliğinden eliyor — aşağıdaki hata
+          # dizgisi araması ikinci kapı olarak duruyor.
+          gh issue view "$NUM" --json comments | jq -r \
+            --arg p "parmak:$PARMAK" '
+            [.comments[] | select(.body | startswith("**Mühendis-check:**"))
+                         | select(.body | contains($p))] | last | .body // ""
+          ' > muhendis.txt
+          gh issue view "$NUM" --json comments | jq -r \
+            --arg p "parmak:$PARMAK" '
+            [.comments[] | select(.body | startswith("**Mimar-check:**"))
+                         | select(.body | contains($p))] | last | .body // ""
+          ' > mimar.txt
+          cat muhendis.txt mimar.txt > checks.txt
+
+          {
+            echo "${GITHUB_REPOSITORY} projesinin ürün yöneticisisin. Bir şartname"
+            echo "iç kontrolden geçti: baş mühendis ve deneyim mimarı görüşlerini"
+            echo "bildirdi. Görevin bu görüşleri tartmak."
+            echo
+            echo "## Kurallar"
+            echo "- Haklı bulduğun görüşü şartnameye işle; haklı bulmadığını"
+            echo "  gerekçesiyle reddet. Sessiz kabul da sessiz ret de yasak."
+            echo "- 'yorum yok' diyen denetçi onay vermiştir; bunu not etmen yeter."
+            echo "- Görüşler işin fazını ya da sırasını değiştiriyorsa Sıralama"
+            echo "  bölümünü güncelle; gerekirse 'şimdi değil' de."
+            echo "- Kapsamı kendiliğinden genişletme; mimarın önerisi ölçüsüzse"
+            echo "  (DNA'daki zevk sınırlarını aşıyorsa) reddetmek senin hakkın."
+            echo "- Yol haritasındaki kapanmış kararları yeniden açma."
+            echo
+            echo "## Çıktı biçimi — tam olarak buna uy"
+            echo "İlk satır: KARAR: REVIZE ya da KARAR: AYNEN"
+            echo "Sonra '<<<SENTEZ>>>' satırı ve altına issue'ya yorum olarak"
+            echo "yazılacak kısa değerlendirme: hangi görüş kabul, hangisi ret,"
+            echo "neden; sıralama kararın."
+            echo "KARAR REVIZE ise ardından '<<<GOVDE>>>' satırı ve altına"
+            echo "şartnamenin YENİ TAM gövdesi (başlık hariç)."
+            echo
+            echo "# Ürün DNA'sı"
+            cat docs/PRODUCT-DNA.md
+            echo
+            echo "# Yol haritası"
+            cat docs/ROADMAP.md
+            echo
+            echo "# Şartname"
+            echo "## Başlık"
+            cat raw_title.txt
+            echo "## Gövde"
+            cat raw_body.txt
+            echo
+            echo "# İç kontrol görüşleri"
+            cat checks.txt
+          } > prompt.md
+
+          # Metin üretimi tek kapıdan geçer: birinci sağlayıcının kotası
+          # dolduğunda ikincisi devralır, akış durmaz.
+          # REVIZE kararında çıktı şartnamenin TAM gövdesini içerir; 8000
+          # tavanı düşünen modelde bunu kesiyordu ve <<<SENTEZ>>> işareti hiç
+          # üretilemeden iş kırmızıya düşüyordu.
+          # KAPI, ÇAĞRIDAN ÖNCE. Denetim yapılmadıysa sentez zaten
+          # yazılmayacak; kapıyı çağrının ardına koymak, her turda 24.000
+          # token tavanlı bir çağrının tam bedelini ödeyip üretilen metni
+          # çöpe atmak demekti. Kapının girdisi (checks.txt) çağrıdan önce
+          # hazır olduğuna göre kapı da orada durmalı.
+          #
+          # Yarım kalmış ya da hiç koşmamış bir denetim, dolu bir yorum
+          # bıraktığı için sentezi geçebiliyordu: iş yeşil biter,
+          # `needs-approval` düşer ve sahip "iki denetçi de baktı" sanır.
+          # Sessiz onay, denetimin hiç olmamasından kötüdür.
+          # Kapı iki şey sorar: yorum VAR MI, ve BAŞARILI MI. Yalnızca hata
+          # dizgisi aramak, hiç yazılmamış bir denetimi "sorun yok" sayıyordu —
+          # doğrudan ya da yarışan bir dispatch, denetçi hiç koşmamışken
+          # şartnameyi onaya gönderebilirdi.
+          # Sayım da parmak izine bağlı: "yorum var mı" değil, "BU SÜRÜMÜN
+          # yorumu var mı". Eski sürümün yorumu sayıldığı sürece kapı,
+          # denetlenmemiş bir revizyonu denetlenmiş sayar.
+          #
+          # Sayı jq'dan okunuyor, dosya boyutundan DEĞİL: eşleşme yokken
+          # `last | .body // ""` boş bir dize üretiyor ve `jq` onu satır
+          # sonuyla basıyor — dosya bir bayt oluyor ve `[ -s … ]` "dolu"
+          # diyor. Kuru koşuda ölçüldü: eşleşmeyen mühendis yorumu 0 yerine
+          # 1 sayıldı, yani kapı tam da kapatması gereken hâlde açılıyordu.
+          MUH=$(gh issue view "$NUM" --json comments | jq -r \
+            --arg p "parmak:$PARMAK" \
+            '[.comments[] | select(.body | startswith("**Mühendis-check:**"))
+                          | select(.body | contains($p))] | length')
+          MIM=$(gh issue view "$NUM" --json comments | jq -r \
+            --arg p "parmak:$PARMAK" \
+            '[.comments[] | select(.body | startswith("**Mimar-check:**"))
+                          | select(.body | contains($p))] | length')
+          if [ "$MUH" -lt 1 ] || [ "$MIM" -lt 1 ] \
+             || grep -qE 'Bu denetim yarım kaldı|Denetim yapılamadı' checks.txt; then
+            # `set -e` altında `[ … ] && X` kalıbı, koşul tutmadığında adımı
+            # düşürür (AND listesinin çıkışı testin çıkışıdır). Kapı metnini
+            # yazan bir satırın kapının kendisini kırmızıya çevirmemesi için
+            # atamalar `if` bloğunda.
+            EKSIK=""
+            if [ "$MUH" -lt 1 ]; then EKSIK="mühendis"; fi
+            if [ "$MIM" -lt 1 ]; then EKSIK="${EKSIK:+$EKSIK ve }mimar"; fi
+            {
+              echo "**Kapı kapalı: denetim tamamlanmadı (parmak izi uyumsuzluğu veya eksik denetim).**"
+              echo
+              echo "Şartnamenin şu anki sürümü: \`$PARMAK\`."
+              if [ -n "$EKSIK" ]; then
+                echo "Bu sürümle basılmış bir **$EKSIK** denetimi yok — ya hiç"
+                echo "koşmadı ya da eldeki yorum daha eski bir sürüme ait."
+              else
+                echo "Denetimlerden en az biri yarım kalmış."
+              fi
+              echo
+              echo "Bu şartname denetlenmiş sayılmaz ve onaya gönderilmiyor;"
+              echo "\`internal-check\` etiketi duruyor, süpürücü denetimi"
+              echo "yeniden tetikleyecek."
+            } > kapi.md
+
+            # Sayaç **yorumdan önce** okunuyor ve yorumu da o sınırlıyor.
+            #
+            # Eskiden yorum koşulsuz yazılır, yalnız dispatch sayılırdı. İkisi
+            # ayrı olduğu için sonuç şuydu: #561'de 122, #557'de 43 tane aynı
+            # "Kapı kapalı" yorumu birikti — dispatch üçte durmuştu ama yorum
+            # durmamıştı, çünkü iç kontrolü başka tetikleyiciler de uyandırıyor
+            # (`on: issues`, süpürücü) ve her uyanış sentezi bu kola sokuyordu.
+            #
+            # Sayacın yorumu saymasının ikinci bir sonucu var ve kabul ediliyor:
+            # yorumlar temizlenirse sayaç sıfırlanır ve kol yeniden üç tur
+            # döner. Üç tur, temizliğin bedeli olarak kabul edilebilir; sayacı
+            # kalıcı bir yüzeye taşımak (etiket ya da PR gövdesi gibi) bu
+            # dosyanın kapsamını aşıyor.
+            #
+            # SAYAÇ SÜRÜM BAŞINA. Kapı eskiden yalnızca "denetim eksik ya da
+            # yarım" halinde kapanıyordu; parmak izi şartı ona bir hal daha
+            # ekledi ve o hal **her revizyonda** yaşanıyor. Kümülatif bir
+            # sayaç bu yüzden üçüncü revizyonda doyar ve dördüncüde kapı
+            # sessizleşir: yorum yazılmaz, iç kontrol geri çağrılmaz, iş
+            # kendini bekler halde donar. Yani sayacın kapsamı kapının
+            # kapsamıyla birlikte büyümek zorundaydı.
+            #
+            # Her kapı yorumu şartnamenin o anki parmağını gövdesinde taşıyor
+            # (yukarıdaki `kapi.md`), yani ayrım bedavaya geliyor. Döngü
+            # koruması aynen duruyor — yalnızca her sürüm kendi üç turunu
+            # alıyor, öncekinden devraldığı borcu değil. Parmaksız eski
+            # biçimli yorumlar hiçbir sürüme sayılmıyor; sayılsalardı hangi
+            # sürümün borcu oldukları okunamazdı.
+            KAPALI=$(gh issue view "$NUM" --json comments 2>/dev/null \
+              | jq -r --arg p "$PARMAK" \
+              '[.comments[].body | select(startswith("**Kapı kapalı")) | select(contains($p))] | length' 2>/dev/null || echo 0)
+            if [ "${KAPALI:-0}" -lt 3 ]; then
+              gh issue comment "$NUM" --body-file kapi.md
+            else
+              echo "kapı $KAPALI kez kapalı bulundu — yorum yazılmıyor, yığın büyütülmüyor"
+            fi
+
+            # Geri çağırma sayaçlı.
+            #
+            # Bu satır iç kontrolü uyandırıyor, iç kontrol sentezi uyandırıyor;
+            # kapı hâlâ kapalıysa aynı tur baştan başlıyor. Sayaç yokken #576
+            # üzerinde on tur döndü. Üçüncü denemeden sonra dispatch atlanıyor:
+            # `internal-check` etiketi duruyor ve süpürücünün beş denemelik kolu
+            # işi kaybetmiyor, yalnız döngü kendi kendini beslemeyi bırakıyor.
+            # Yorumlar burada yeniden çekiliyor: bu adımda `YORUMLAR` diye bir
+            # değişken yok (üstteki okumalar dosyaya yazıyor), ve tanımsız bir
+            # değişkenden sayan bir sayaç her turda sıfır okur — yani sayaç
+            # varmış gibi görünüp hiçbir şey saymaz.
+            if [ "${KAPALI:-0}" -lt 3 ]; then
+              gh workflow run "İç kontrol" -f issue="$NUM" >/dev/null 2>&1 || true
+            else
+              echo "kapı $KAPALI kez kapalı bulundu — geri çağırma durduruldu, süpürücüye bırakılıyor"
+            fi
+            exit 0
+          fi
+
+          bash .github/scripts/llm.sh prompt.md out.md 24000
+
+          # Farklı modeller çıktıya kod çitiyle ya da boş satırla başlıyor;
+          # "ilk satır" kuralı o zaman tutmuyordu ve karar sessizce AYNEN'e
+          # düşüyordu: gövde yazılmaz ama yorum "işledim" der ve iş onaya
+          # gider. Eşleşmeyen çıktı varsayılana DÜŞMEZ, adımı düşürür.
+          sed -i '/^```/d' out.md
+          ILK=$(grep -m1 -v '^[[:space:]]*$' out.md || true)
+          KARAR=$(printf '%s' "$ILK" | grep -oE 'REVIZE|AYNEN' || true)
+          if [ -z "$KARAR" ]; then
+            echo "sentez: karar okunamadı — ilk dolu satır beklenen biçimde değil:" >&2
+            printf '%s\n' "$ILK" | head -c 300 >&2
+            exit 1
+          fi
+          awk '/^<<<SENTEZ>>>/{s=1;next} /^<<<GOVDE>>>/{s=0} s' out.md > sentez.md
+          awk '/^<<<GOVDE>>>/{g=1;next} g' out.md > govde.md
+
+          test -s sentez.md || { echo "Sentez bölümü boş" >&2; exit 1; }
+
+          if [ "$KARAR" = "REVIZE" ] && [ -s govde.md ]; then
+            {
+              cat govde.md
+              printf '\n\n_İç kontrolden geçip revize edildi. Onaylıyorsan `agent-ready` etiketi ekle._\n'
+            } > yeni_govde.md
+            gh issue edit "$NUM" --body-file yeni_govde.md
+          fi
+
+          {
+            echo "**Sentez (ürün yöneticisi):**"
+            echo
+            cat sentez.md
+            echo
+            echo "@${GITHUB_REPOSITORY_OWNER} — iç kontrol tamam, şartname onayına hazır."
+            echo
+            echo "---"
+            printf '_Ürün yöneticisi · %s_\n' "$(cat .llm_kim 2>/dev/null || echo bilinmiyor)"
+          } > yorum.md
+          gh issue comment "$NUM" --body-file yorum.md
+
+          # DOKTRİN VE İŞ AKIŞI İŞLERİ ONAY KUYRUĞUNA GİRMEZ.
+          #
+          # Sahibin kuralı (4 Eylül): hattın kendi çalışma kurallarını —
+          # iş akışları, CI, ajan doktrini — konu alan bir iş, ürün işiyle
+          # aynı kuyruğa girmiyor. Sebebi ölçüldü: böyle bir kayıt triyajı,
+          # PM'i ve süpürücüyü uyandırıp faturalı Actions dakikası yakıyor,
+          # ajanlar kendi kurallarını tartışan bir kaydı iş sanıp üstüne
+          # koşuyor, ve karar zaten sahiple Claude arasında çözülüyor.
+          #
+          # Bu yüzden ayrım burada, sentezin çıkışında yapılıyor: ürün işi
+          # `needs-approval`'a, iş akışı işi `lokal`'e gidiyor. `lokal`
+          # etiketi "hat buna dokunmayacak, Claude bir turda çözecek"
+          # demek — süpürücü de PM de o etiketi görmezden geliyor.
+          #
+          # Ölçüt metinden okunuyor: başlıkta `ci:`/`fix(ci)`/`chore(ci)`
+          # öneki ya da gövdede `.github/workflows` geçmesi. Etiketle
+          # ayırmak daha temiz olurdu ama etiketi koyan da aynı hat;
+          # metin, hattın uyduramayacağı tek işaret.
+          BASLIK_HAM=$(cat raw_title.txt)
+          GOVDE_HAM=$(cat raw_body.txt)
+          if printf '%s' "$BASLIK_HAM" | grep -qiE '^(ci|fix\(ci\)|chore\(ci\)|ci\(.*\)):' \
+             || printf '%s' "$GOVDE_HAM" | grep -q '\.github/workflows'; then
+            gh label create lokal --color 5319e7 \
+              --description "Is akisi/doktrin — hat dokunmaz, Claude cozer" --force >/dev/null 2>&1 || true
+            gh issue edit "$NUM" --remove-label internal-check --add-label lokal
+            gh issue comment "$NUM" --body "**Yönlendirme:** bu iş hattın kendi çalışma kurallarını (iş akışı / CI / doktrin) konu alıyor, o yüzden onay kuyruğuna değil \`lokal\`e alındı. Hat buna token harcamayacak; bir sonraki turda Claude çözüp kapatacak." >/dev/null 2>&1 || true
+            echo "#$NUM iş akışı işi → lokal" >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh label create needs-approval --color fbca04 \
+              --description "Sartnameye cevrildi, onay bekliyor" --force >/dev/null 2>&1 || true
+            gh issue edit "$NUM" --remove-label internal-check --add-label needs-approval
+          fi

@@ -1,0 +1,243 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+name: PR iç kontrol
+
+# Şartnameyi denetleyen iki göz, koda da bakar. Mimar teslim edilen deneyimi
+# sınar (haptik, hareket, görsel), ürün yöneticisi işin şartnameye ve ürünün
+# ruhuna sadık kalıp kalmadığını. CodeRabbit doğruluğa bakar; bunlar niyete.
+# Ayrıca çakışan dal sessizce beklemesin diye durumu yüksek sesle söylenir.
+
+# **Bu dosya merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici çağıran deponun sarmalayıcısında duruyor; burada yalnız iş var.
+# Sebebi tek kopya: bu hattı birden çok proje kullanıyor ve doktrin bir
+# projede değişip ötekilerde eskimemeli.
+#
+# Çağıran bağlam olduğu gibi korunuyor — `github.repository`, `github.event`,
+# `github.event_name`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar
+# hepsi **çağıran deponun** değerleri.
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: "Denetlenecek PR numarası"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-check-${{ inputs.pr || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Diff ve çakışma durumu
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ inputs.pr || github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          # Elle tetiklendiğinde PR olay verisi yoktur: taban ve dal PR'ın
+          # kendisinden okunur. Checkout da varsayılan dalı almış olur, o
+          # yüzden PR'ın başı ayrıca getirilir.
+          if [ -z "${BASE:-}" ]; then
+            BASE=$(gh pr view "$NUM" --json baseRefName --jq .baseRefName)
+            HEADREF=$(gh pr view "$NUM" --json headRefName --jq .headRefName)
+            git fetch origin "$HEADREF" --quiet
+            git checkout -q "origin/$HEADREF"
+          fi
+          git fetch origin "$BASE" --quiet || true
+          # Yalnızca bu dalın getirdiği değişiklik: taban ile ortak atadan bu yana.
+          git diff "origin/${BASE}...HEAD" > pr.diff || git diff "origin/${BASE}..HEAD" > pr.diff
+          # 400k'yı aşan diff modele sığmaz; kırpıldığı yazılır ki sessiz eksik olmasın.
+          # 400KB'lık bir diff tek denetimde ~130k token demek. Deneyim ve
+          # kapsam denetimi için ilk 80KB fazlasıyla yeter; gerisi kırpılır.
+          if [ "$(wc -c < pr.diff)" -gt 80000 ]; then
+            head -c 80000 pr.diff > pr.diff.cut
+            echo "" >> pr.diff.cut
+            echo "[... diff kırpıldı; tamamı için PR'a bak ...]" >> pr.diff.cut
+            mv pr.diff.cut pr.diff
+          fi
+          gh pr view "$NUM" --json title,body --jq '.title, .body' > pr_meta.txt
+
+          # mergeable hesabı asenkron: UNKNOWN ise kısa bir süre bekle.
+          M=$(gh pr view "$NUM" --json mergeable --jq .mergeable)
+          for _ in 1 2 3; do
+            [ "$M" != "UNKNOWN" ] && break
+            sleep 5
+            M=$(gh pr view "$NUM" --json mergeable --jq .mergeable)
+          done
+          echo "mergeable=$M" >> "$GITHUB_OUTPUT"
+
+      - name: Çakışmayı duyur
+        if: steps.ctx.outputs.mergeable == 'CONFLICTING'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ inputs.pr || github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$NUM" --body "**Çakışma:** Bu dal \`${BASE}\` ile birleşemez durumda. Mühendis bir sonraki bakım turunda \`${BASE}\`'i dala birleştirip onarmalı; yalnızca-ekleme belgelerinde iki taraf da korunur, bayat maddeye dikkat edilir. Onarılana kadar inceleme yorumları eskiyebilir."
+
+      - name: Anahtarlar
+        id: guard
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ inputs.pr || github.event.pull_request.number }}
+        run: |
+          [ -n "$GEMINI_API_KEY" ] && echo "pm=true" >> "$GITHUB_OUTPUT" || echo "pm=false" >> "$GITHUB_OUTPUT"
+          # Mimar yalnızca duyuya dokunan farkta çağrılır. Ölçüt dosya yolu,
+          # model değil: "dokunuyor mu" kararını ucuz modele sormak denendi
+          # ve düştü (uyduruyor, biçime uymuyor). Doktrin: pahalı araç ayarla
+          # ucuzlamaz, ne zaman çağrılacağına karar verilir. Çağrılmadığında
+          # PR'a sebebi yazılır — sessiz kesinti yasak.
+          DUYU=false
+          # Native arayüz de duyuya dokunuyor (#722). Kapı yazıldığında
+          # `ios/` altında kullanıcının gördüğü bir yüzey yoktu; bugün var:
+          # widget çizimi ve dokunma hedefleri, Kontrol Merkezi kontrolü,
+          # bildirim içeriği, Siri'de okunan intent adları.
+          #
+          # Bedeli ölçüldü: #718'de mimar `vaultWidgetActionSize = 30`u yakaladı
+          # ve DNA'nın 44pt sınırını ihlal ettiğini söyledi — ama o denetim
+          # yalnızca PR aynı zamanda `src/`'ye dokunduğu için koştu. Aynı
+          # ihlalin düzeltmesi (#720) ve yepyeni bir yüzey olan Kontrol Merkezi
+          # kontrolü (#721) Swift-only geldi ve mimar ikisine de bakmadı.
+          #
+          # Kalıp dar tutuluyor: `AppDelegate.swift`, `VaultIntentStore.swift`
+          # ve `cap sync`in her turda yeniden yazdığı `project.pbxproj` ile
+          # `Package.swift` dışarıda. Denetim PR başına fiyatlanıyor; her Swift
+          # değişikliğinde mimar çağırmak bütçeyi yakar.
+          DUYU_KALIP='^\+\+\+ b/(src/|ios/App/VaultWidget/|ios/App/VaultNotificationService/|ios/App/App/VaultIntents\.swift|.*\.css$|tailwind\.config)'
+          if [ -s pr.diff ] && grep -qE "$DUYU_KALIP" pr.diff; then DUYU=true; fi
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "mimar=false" >> "$GITHUB_OUTPUT"
+          elif [ "$DUYU" = "true" ]; then
+            echo "mimar=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mimar=false" >> "$GITHUB_OUTPUT"
+            DEGISEN=$(grep -oE '^\+\+\+ b/[^ ]+' pr.diff | sed 's|^+++ b/||' | head -12 | tr '\n' ' ')
+            if ! gh pr view "$NUM" --json comments --jq '.comments[].body' | grep -q '^\*\*Mimar çağrılmadı'; then
+              gh pr comment "$NUM" --body "**Mimar çağrılmadı:** bu farkta duyuya dokunan dosya yok (\`src/\`, \`ios/App/VaultWidget/\`, \`ios/App/VaultNotificationService/\`, \`VaultIntents.swift\`, \`.css\`, \`tailwind.config\`). Değişen dosyalar: ${DEGISEN:-yok}." >/dev/null 2>&1 || true
+            fi
+            echo "mimar atlandı: duyuya dokunan dosya yok"
+          fi
+
+      - name: Mimar — teslim edilen deneyim
+        if: steps.guard.outputs.mimar == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL: ${{ vars.CLAUDE_ARCHITECT_MODEL || 'claude-sonnet-5' }}
+          EFOR: ${{ vars.CLAUDE_ARCHITECT_EFFORT || 'high' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ inputs.pr || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          {
+            echo "${GITHUB_REPOSITORY} projesinin deneyim mimarısın. Aşağıdaki PR"
+            echo "kodu teslim ediyor; senin işin hissi denetlemek: haptik, hareket,"
+            echo "görsel hiyerarşi, boş ve hata durumlarının tonu."
+            echo
+            echo "Biçim: Bu diff kullanıcının duyularına dokunmuyorsa (arka uç,"
+            echo "belge, altyapı) yalnızca 'yorum yok' yaz. Dokunuyorsa en fazla 2"
+            echo "madde: hangi dosyada hangi an, ne eksik ya da ne fazla. Kod"
+            echo "doğruluğuna girme — denetçinin işi o. Ölçülülük ilkendir: eklenen"
+            echo "süs de eksik kalan his kadar hatadır."
+            echo
+            echo "# Ürün DNA'sı"
+            cat docs/PRODUCT-DNA.md
+            echo
+            echo "# PR"
+            cat pr_meta.txt
+            echo
+            echo "# Diff"
+            echo '```diff'
+            cat pr.diff
+            echo '```'
+          } > prompt.md
+          # max_tokens, düşünen modellerde thinking ve metin bloklarının
+          # PAYLAŞTIĞI bütçedir. 4000'de düşünme bütçeyi yiyor ve metne birkaç
+          # token kalıyordu: yorum cümlenin ortasında kesilip yeşil bitiyordu.
+          # Efor kolu görünür ve tek yerden ayarlanır; varsayılan `high`, yani
+          # davranış değişmedi. Sahibin kararı: düşünme kısılmıyor.
+          jq -n --rawfile p prompt.md --arg m "$MODEL" --arg e "$EFOR" \
+            '{model:$m, max_tokens:16000, output_config:{effort:$e}, messages:[{role:"user", content:$p}]}' > req.json
+          HTTP=$(curl -sS -o resp.json -w '%{http_code}' -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" -H "anthropic-version: 2023-06-01" \
+            -H 'Content-Type: application/json' --data @req.json)
+          # Maliyet, yanıt işe yarasın ya da yaramasın yazılıyor: 200 dönen her
+          # çağrı faturalanır ve `exit 0` ile sessizce çıkılan dal sayacı atlar.
+          . .github/scripts/maliyet-yaz.sh
+          if [ "$HTTP" = "200" ]; then
+            maliyet_yaz "claude/$MODEL" \
+              "$(jq -r '.usage.input_tokens // 0' resp.json)" \
+              "$(jq -r '.usage.output_tokens // 0' resp.json)" \
+              "$(jq -r '.usage.cache_creation_input_tokens // 0' resp.json)" \
+              "$(jq -r '.usage.cache_read_input_tokens // 0' resp.json)"
+          fi
+          [ "$HTTP" = "200" ] || { echo "Claude $HTTP" >&2; jq -r '.error.message // .' resp.json >&2; exit 0; }
+          # Düşünen modellerde ilk blok thinking olabilir; metni türüne göre ayıkla.
+          jq -r '[.content[] | select(.type=="text") | .text] | join("\n")' resp.json > out.md
+          # Kesilmiş yanıt dolu bir dosyadır ve nöbetçiyi geçer. Tek ayırt edici
+          # işaret stop_reason: okunmazsa yarım denetim tam denetim sayılır.
+          DUR=$(jq -r '.stop_reason // "?"' resp.json)
+          if [ "$DUR" = "max_tokens" ]; then
+            printf '\n\n> **Bu denetim yarım kaldı** (`stop_reason: max_tokens`). Yukarıdaki metin kesilmiştir; PR denetlenmiş sayılmaz.\n' >> out.md
+          fi
+          { [ -s out.md ] && ! grep -qix 'yorum yok' out.md; } || { echo "Mimar: yorum yok"; exit 0; }
+          { echo "**Mimar (PR):**"; echo; cat out.md; echo; echo "---"; printf '_Mimar · claude/%s · efor %s_\n' "$MODEL" "$EFOR"; } > c.md
+          gh pr comment "$NUM" --body-file c.md
+
+      - name: Ürün yöneticisi — şartnameye sadakat
+        if: steps.guard.outputs.pm == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ inputs.pr || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          {
+            echo "${GITHUB_REPOSITORY} projesinin ürün yöneticisisin. Mühendis bir PR"
+            echo "teslim etti. Görevin kapsam sadakatini denetlemek: şartnamenin"
+            echo "istediği yapıldı mı, istemediği sessizce eklendi mi, yol"
+            echo "haritasındaki kapanmış bir karar çiğnendi mi, harita güncellenmesi"
+            echo "gerekiyorsa yapıldı mı."
+            echo
+            echo "Biçim: Sorun yoksa yalnızca 'yorum yok' yaz. Varsa en fazla 3 madde,"
+            echo "her biri tek cümle ve dosya atıflı. Kod doğruluğuna ve stiline girme."
+            echo
+            echo "# Ürün DNA'sı"
+            cat docs/PRODUCT-DNA.md
+            echo
+            echo "# Yol haritası"
+            cat docs/ROADMAP.md
+            echo
+            echo "# PR"
+            cat pr_meta.txt
+            echo
+            echo "# Diff"
+            echo '```diff'
+            cat pr.diff
+            echo '```'
+          } > prompt2.md
+          jq -n --rawfile p prompt2.md '{contents:[{parts:[{text:$p}]}]}' > req2.json
+          HTTP=$(curl -sS -o resp2.json -w '%{http_code}' \
+            -X POST "https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent" \
+            -H "x-goog-api-key: ${GEMINI_API_KEY}" -H 'Content-Type: application/json' --data @req2.json)
+          [ "$HTTP" = "200" ] || { echo "Gemini $HTTP" >&2; jq -r '.error.message // .' resp2.json >&2; exit 0; }
+          jq -r '.candidates[0].content.parts[]?.text // empty' resp2.json > out2.md
+          grep -qix 'yorum yok' out2.md && { echo "PM: yorum yok"; exit 0; }
+          { echo "**Ürün yöneticisi (PR):**"; echo; cat out2.md; } > c2.md
+          gh pr comment "$NUM" --body-file c2.md

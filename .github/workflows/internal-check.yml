@@ -1,0 +1,641 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+name: İç kontrol
+
+# Şartname onaya çıkmadan iki göz daha görür: baş mühendis (teknik gerçeklik)
+# ve deneyim mimarı (haptik, ses, görsel, animasyon, video — ölçülü estetik).
+# İkisi de Claude'da koşar; söyleyecek sözü olmayan "yorum yok" yazar.
+# İki yorum da düştüğünde sentez, workflow_dispatch ile tetiklenir — çünkü
+# GITHUB_TOKEN'ın yazdığı yorumlar issue_comment olayını doğurmaz.
+
+# **Bu dosya merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici çağıran deponun sarmalayıcısında duruyor; burada yalnız iş var.
+# Sebebi tek kopya: bu hattı birden çok proje kullanıyor ve doktrin bir
+# projede değişip ötekilerde eskimemeli.
+#
+# Çağıran bağlam olduğu gibi korunuyor — `github.repository`, `github.event`,
+# `github.event_name`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar
+# hepsi **çağıran deponun** değerleri.
+on:
+  workflow_call:
+    inputs:
+      issue:
+        description: "Denetlenecek issue numarası"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: internal-check-${{ inputs.issue || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'internal-check'
+    runs-on: ubuntu-latest
+    strategy:
+      # Bir denetçinin hatası diğerini iptal etmemeli: mühendis düşse de
+      # mimarın görüşü issue'ya düşmeli, tersi de geçerli.
+      fail-fast: false
+      matrix:
+        rol: [muhendis, mimar]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Anahtar ve etiket nöbeti
+        id: guard
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ROL: ${{ matrix.rol }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ inputs.issue || github.event.issue.number }}
+        run: |
+          # Sentezden sonra gelen denetim, kapanmış bir tartışmaya söz atmaktır:
+          # şartname çoktan onaya çıkmıştır ve yeni yorum sahibi yanıltır.
+          # Etiket düşmüşse iş bitmiştir.
+          if ! gh issue view "$NUM" --json labels --jq '[.labels[].name]' | jq -e 'index("internal-check")' >/dev/null; then
+            echo "Issue #$NUM iç kontrolde değil; denetim atlanıyor."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fırtına kapısı: aynı şartname aynı sürümüyle ikinci kez
+          # denetlenmez. 21 Ağustos'ta #357'ye iki saatte 50 mimar çağrısı
+          # gitti; hepsi aynı metne bakıyordu. Parmak izi başlık + gövde +
+          # yorumlardaki görsel adreslerinden; yalnızca BAŞARILI denetimin
+          # yorumuna yazılır (Yorumu bırak adımı), yani hata yorumu mühür
+          # olmaz ve kredi bitik bir gün şartnameyi kalıcı kilitlemez.
+          {
+            gh issue view "$NUM" --json title,body --jq '.title, .body'
+            gh issue view "$NUM" --json comments --jq '.comments[].body' 2>/dev/null \
+              | grep -oE 'https://[^ )"]+\.(png|jpe?g|webp)' || true
+          } | sha256sum | cut -c1-16 > parmak.txt
+          PARMAK=$(cat parmak.txt)
+          ONEK=$([ "$ROL" = "muhendis" ] && echo '**Mühendis-check:**' || echo '**Mimar-check:**')
+          # Yalnızca BU rolün başarılı yorumunda aynı parmak izi varsa atla;
+          # mimarın mührü mühendisi, mühendisinki mimarı durdurmaz.
+          ESKI=$(gh issue view "$NUM" --json comments 2>/dev/null \
+            | jq -r --arg o "$ONEK" --arg p "parmak:$PARMAK" \
+            '[.comments[] | select(.body | startswith($o)) | select(.body | contains($p))] | length' 2>/dev/null || echo 0)
+          if [ "${ESKI:-0}" != "0" ]; then
+            echo "Issue #$NUM bu sürümüyle ($PARMAK) zaten denetlendi; çağrı yapılmıyor."
+            echo "Aynı şartname sürümü ($PARMAK) için ikinci $ROL denetimi atlandı — bedel sıfır." >> "$GITHUB_STEP_SUMMARY"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Mühendis kaynak kodun tamamını okur; bu hacim ücretli bir modelde
+          # issue başına ciddi para eder ve ürün yöneticisiyle aynı kurulumu
+          # zaten paylaşır. Mimar kaynak okumaz, küçük bağlamla çalışır — asıl
+          # değeri estetik yargıda olduğu için ayrı sağlayıcıda kalır.
+          if [ "$ROL" = "muhendis" ]; then
+            { [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$GEMINI_API_KEY" ]; } && echo "ok=true" >> "$GITHUB_OUTPUT" || {
+              echo "İki anahtar da yok; mühendis denetimi atlanıyor." >&2
+              echo "ok=false" >> "$GITHUB_OUTPUT"; }
+          else
+            # Mimar artık iki yoldan koşabiliyor: görsel varsa Anthropic,
+            # yoksa NVIDIA. Guard yalnız Anthropic'e baksaydı, anahtar
+            # düştüğünde mimar görselsiz issue'larda da susardı — oysa o
+            # issue'ları zaten Anthropic'siz denetleyebiliyor.
+            { [ -n "$ANTHROPIC_API_KEY" ] || [ -n "${NVIDIA_API_KEY:-}" ]; } && echo "ok=true" >> "$GITHUB_OUTPUT" || {
+              echo "Ne ANTHROPIC_API_KEY ne NVIDIA_API_KEY var; mimar denetimi atlanıyor." >&2
+              echo "ok=false" >> "$GITHUB_OUTPUT"; }
+          fi
+
+      - name: Şartnameyi denetle
+        if: steps.guard.outputs.ok == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL: ${{ matrix.rol == 'mimar' && (vars.CLAUDE_ARCHITECT_MODEL || 'claude-sonnet-5') || (vars.CLAUDE_CHECK_MODEL || 'claude-haiku-4-5-20251001') }}
+          # Mühendis NVIDIA'nın ücretsiz uç noktasına taşındı; mimar taşınmadı.
+          #
+          # 30 Ağustos'ta dört model aynı iki görevle sınandı. Mühendis
+          # görevinde (bilerek hatalı bir iş akışı diffi) `nemotron-3-ultra`
+          # sekiz saniyede üç gerçek kusur buldu: tanımsız `$YORUMLAR`,
+          # okunmayan `raw_title.txt`/`raw_body.txt`, ve `set -euo pipefail`
+          # altında `|| true` taşımayan `gh issue view`. Son ikisi insan
+          # denetiminin de kaçırdığı kusurlardı.
+          #
+          # Mimar taşınmadı ve sebebi ölçüldü: mimar isteme **ekran
+          # görüntüsü** ekliyor (aşağıda, `gorseller.json`) ve `nemotron-3-ultra`
+          # metin-only. Görsel alan ücretsiz modeller (`llama-3.2-90b-vision`,
+          # `nemotron-3-nano-omni`) denendi ve ürettikleri şey "hiyerarşi iyi,
+          # kontrast yüksek, boşluklar dengeli" oldu — bu deponun kurallarının
+          # açıkça yasakladığı genel geçer klişe. Aynı karede Claude, doktrin
+          # metninin ekranda olmayan bir kavramdan söz ettiğini bulmuştu.
+          # Görselleri sessizce kaybeden bir mimar, olmayan bir mimardır.
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          NVIDIA_MODEL: ${{ vars.NVIDIA_CHECK_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b' }}
+          NVIDIA_MIMAR_MODEL: ${{ vars.NVIDIA_ARCHITECT_MODEL || 'moonshotai/kimi-k3' }}
+          YEDEK_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
+          EFOR: ${{ vars.CLAUDE_ARCHITECT_EFFORT || 'high' }}
+          ROL: ${{ matrix.rol }}
+          NUM: ${{ inputs.issue || github.event.issue.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          RAW_TITLE=$(gh issue view "$NUM" --json title --jq .title)
+          RAW_BODY=$(gh issue view "$NUM" --json body --jq .body)
+
+          VARSAYILAN_YOLLAR="src"
+          VARSAYILAN_UZANTILAR="ts tsx js jsx py rs go swift kt java c cpp h sql"
+          if [ -f .agentrc ]; then . ./.agentrc; else
+            echo "UYARI: .agentrc yok — varsayılan yollar kullanılacak." >&2
+          fi
+          KAYNAK_YOLLARI="${KAYNAK_YOLLARI:-$VARSAYILAN_YOLLAR}"
+          KAYNAK_UZANTILARI="${KAYNAK_UZANTILARI:-$VARSAYILAN_UZANTILAR}"
+
+          kaynak_dosyalari() {
+            args=()
+            for u in $KAYNAK_UZANTILARI; do
+              [ "${#args[@]}" -gt 0 ] && args+=(-o)
+              args+=(-name "*.${u}")
+            done
+            # shellcheck disable=SC2086 — yollar bilerek sözcüklere ayrılıyor
+            find $KAYNAK_YOLLARI -type f \( "${args[@]}" \) 2>/dev/null | sort
+          }
+          KAYNAK_LISTESI=$(kaynak_dosyalari || true)
+
+          # Kaynak büyüdükçe döküm modelin bağlam penceresini aşar ve denetim
+          # tamamen düşer. Bütçe dolunca kalanları adıyla listelemek, hiç
+          # denetlenmemekten iyidir; kırpma sessiz kalmasın diye yazılır.
+          # 60 KB — sahibin 21 Ağustos 2026 kararı. 150 KB ile kaynak-sec her
+          # koşuda bütçeyi sonuna kadar dolduruyordu (60 issue'da 60, ölçüldü)
+          # ve ayda ~$50 ek yazıyordu; 60 KB ile ek ~$12 ve üç ölçülmüş arıza
+          # (sıfır kaynak, test sızıntısı, hayalet dosya) kapanıyor.
+          KAYNAK_BUTCESI=${KAYNAK_BUTCESI:-60000}
+
+          printf '%s\n' "$RAW_TITLE" > raw_title.txt
+          printf '%s\n' "$RAW_BODY"  > raw_body.txt
+
+          # Görseller yalnızca mimara gidiyor. Mühendisin işi teknik gerçeklik
+          # ve kaynak kodu okuyor; ekran görüntüsü ona bir şey söylemez, her
+          # görsel ise istemi büyütür.
+          echo '[]' > gorseller.json
+          if [ "$ROL" = "mimar" ]; then
+            # Yorumlar da taranıyor: sahip ekran görüntüsünü çoğu zaman
+            # issue'yu açtıktan sonra, yoruma bırakıyor.
+            gh issue view "$NUM" --json comments --jq '.comments[].body' > raw_comments.txt 2>/dev/null || : > raw_comments.txt
+            cat raw_title.txt raw_body.txt raw_comments.txt > raw_gorsel_kaynagi.txt
+            GORSELLER=$(node .github/scripts/gorsel-sec.mjs raw_gorsel_kaynagi.txt \
+              --tavan "${MIMAR_GORSEL_TAVANI:-4}" || true)
+
+            for u in $GORSELLER; do
+              # Depo özel olabilir: GitHub'ın ek adresleri o zaman yetki ister.
+              # Modele adresi verip indirmesini beklemek bu yüzden çalışmaz;
+              # bayt burada, yetkili olarak alınıyor.
+              kod=$(curl -sSL --max-time 30 -H "Authorization: Bearer $GH_TOKEN" \
+                -o gorsel.bin -w '%{http_code}' "$u" || echo 000)
+              if [ "$kod" != "200" ]; then
+                echo "gorsel: indirilemedi ($kod), atlanıyor: $u" >&2
+                continue
+              fi
+              tur=$(file -b --mime-type gorsel.bin || echo bilinmiyor)
+              case "$tur" in
+                image/png|image/jpeg|image/gif|image/webp) ;;
+                *) echo "gorsel: desteklenmeyen tür ($tur), atlanıyor: $u" >&2; continue ;;
+              esac
+              boyut=$(wc -c < gorsel.bin)
+              # Sağlayıcının görsel başına tavanı var; aşan istek tamamen
+              # reddedilir, yani tek büyük ekran görüntüsü denetimin tamamını
+              # düşürürdü.
+              if [ "$boyut" -gt 3500000 ]; then
+                echo "gorsel: çok büyük (${boyut} bayt), atlanıyor: $u" >&2
+                continue
+              fi
+              # Kodlama ve birleştirme ayrı ayrı sınanıyor.
+              #
+              # Eskiden tek satırdı: `jq … && mv`. O biçimde `base64` ya da
+              # `jq` düştüğünde **hiçbir mesaj yazılmıyordu** — döngünün öteki
+              # üç düşüş yolu mesaj yazarken bu yol sessizdi. Ölçüldü (#619,
+              # 1 Eylül): `gorsel-sec: 4 görsel bulundu` ardından `gorsel: 0
+              # görsel isteme eklendi`, arada tek satır yok. Mimar o gün
+              # ekranları hiç görmedi ve kimse sebebini okuyamadı.
+              # Base64 **dosyaya** yazılıyor ve jq'ya `--rawfile` ile
+              # veriliyor; `--arg` ile geçirilmiyor.
+              #
+              # Sebep ölçüldü (1 Eylül): Linux'ta tek bir komut satırı
+              # argümanı `MAX_ARG_STRLEN` ile 131.072 bayta sınırlı ve bu sınır
+              # `ARG_MAX`'tan bağımsız — toplam yer olsa bile tek argüman bunu
+              # aşamaz. Bu deponun ekran görüntüleri 90–200 KB; 142 KB'lık bir
+              # PNG'nin base64'ü 190.080 bayt, yani sınırın %45 üstünde.
+              #
+              # Sonuç: mimarın görsel yolu **hiç** çalışmadı. Her kare aynı
+              # yerde düştü ve eski tek satırlık `jq … && mv` biçiminde bu
+              # düşüş sessizdi. Arıza ancak düşüş sesli hâle getirildiğinde
+              # göründü.
+              #
+              # macOS'ta bu sınır yok, yani yerel bir denemede arıza yeniden
+              # üretilemiyor — teşhisin koşucu günlüğünden çıkması bu yüzden.
+              if ! base64 -w0 gorsel.bin > gorsel.b64 2>/dev/null; then
+                echo "gorsel: base64 kodlaması düştü, atlanıyor: $u" >&2
+                continue
+              fi
+              if ! jq --arg t "$tur" --rawfile d gorsel.b64 \
+                '. + [{type:"image", source:{type:"base64", media_type:$t, data:($d | rtrimstr("\n"))}}]' \
+                gorseller.json > gorseller.tmp 2>gorseller.hata; then
+                echo "gorsel: jq birleştirmesi düştü ($(head -c 160 gorseller.hata)), atlanıyor: $u" >&2
+                continue
+              fi
+              mv gorseller.tmp gorseller.json
+              echo "gorsel: eklendi ($tur, $((boyut / 1024)) KB): $u" >&2
+            done
+            echo "gorsel: $(jq length gorseller.json) görsel isteme eklendi" >&2
+          fi
+
+          {
+            if [ "$ROL" = "muhendis" ]; then
+              echo "${GITHUB_REPOSITORY} projesinin baş mühendisisin. Aşağıdaki"
+              echo "şartname onaya çıkmadan teknik gözle senden geçiyor."
+              echo
+              echo "Denetle: (1) kod gerçekliğiyle çelişki — var olmayan dosya,"
+              echo "fonksiyon, tablo atfı; (2) gizli bağımlılık veya açık işlerle"
+              echo "çakışma; (3) eksik ya da yanlış teknik direktif; (4) migration"
+              echo "ve sıralama tuzakları. Kaynak kodun tamamı aşağıda."
+              echo
+              echo "Biçim: Söyleyecek sözün yoksa yalnızca 'yorum yok' yaz, başka"
+              echo "hiçbir şey yazma. Varsa en fazla 5 madde; her madde tek cümle,"
+              echo "dosya/fonksiyon atıflı. Kapsam genişletme önerme; şartnamenin"
+              echo "niyetine sadık kal."
+            else
+              # Mimarın talimatı `docs/roles/mimar.md`'de, burada değil.
+              #
+              # 119 satır `echo` olarak bu dosyada duruyordu ve iki şeyi birden
+              # bozuyordu: dosya `SINIF: GENEL`, yani projeden bağımsız
+              # kopyalanıyor — projeye özel bir talimat oraya yazılamaz; ve
+              # talimat okunamıyordu, `echo` satırlarının arasından çıkarmak
+              # gerekiyordu.
+              #
+              # Doktrinin kendi cümlesi: "iş akışı aptaldır, belgeler
+              # akıllıdır. Bir ajanın ne bileceği YAML'a gömülmez — çalıştığı
+              # reponun belgelerinden okunur."
+              #
+              # Belge yoksa kol susmuyor, sebebini yazıp devam ediyor: talimatı
+              # olmayan bir mimar hüküm veremez ama bunu söyleyebilir.
+              if [ -f docs/roles/mimar.md ]; then
+                # Frontmatter ve HTML yorumu istemin dışında kalıyor; ikisi de
+                # belgeyi insana ve araca anlatıyor, modele değil.
+                #
+                # `awk`, `sed` değil: aralık silmenin BSD ile GNU sözdizimi
+                # ayrışıyor ve bu betik iki yerde de koşuyor — koşucuda GNU,
+                # yerel denemede BSD. Ayrışan bir ayıklayıcı, yerelde
+                # sınanamayan bir istem demek.
+                awk '
+                  NR==1 && $0=="---" { fm=1; next }
+                  fm && $0=="---"    { fm=0; next }
+                  fm                 { next }
+                  /^<!--/            { yorum=1 }
+                  yorum              { if (/-->/) yorum=0; next }
+                                     { print }
+                ' docs/roles/mimar.md | envsubst '$GITHUB_REPOSITORY'
+              else
+                echo "Deneyim mimarısın ama talimatın bulunamadı"
+                echo "(docs/roles/mimar.md yok). Bu şartnameye hüküm verme;"
+                echo "yalnızca 'talimat okunamadı' yaz."
+              fi
+            fi
+
+            if [ "$ROL" = "muhendis" ]; then
+              echo
+              # Notlar **özet** giriyor, tam metin değil. Blok 25 Ağustos'a kadar
+              # bütçesizdi ve notlar biriktikçe her denetim sessizce pahalılaşıyordu:
+              # en yeni 20 not o gün 92 KB'ydi, yani prompt'un yarısından fazlası.
+              # Notun işlevi bir kararın var olduğunu ve ne dediğini bildirmek;
+              # gerekçenin tamamını okumak denetçinin işi değil, dosya adı yazılı.
+              echo "# Mühendislik notları (en yeni 20, özet)"
+              node .github/scripts/not-ozet.mjs \
+                --dizin docs/notes --adet 20 --butce "${NOT_BUTCESI:-16000}" || true
+              echo
+              echo "# Depodaki kaynak dosyalar (yalnızca adlar)"
+              for f in $KAYNAK_LISTESI; do echo "- $f"; done
+              echo
+              echo "# Şartnameyle ilgili dosyaların içeriği"
+              # Doktrin: prompt'a dosya basan her adım kaynak-sec.mjs'ten geçer.
+              # Bu adım 21 Ağustos'a kadar kendi grep döngüsünü kullanıyordu ve
+              # denetimlerin %42'si mühendise sıfır kaynakla gidiyordu.
+              # kaynak-sec KAYNAK_HER_ZAMAN'ı bütçeden önce garanti eder, yani
+              # sıfır dosya görmek yapısal olarak imkânsız hâle geliyor.
+              cat raw_title.txt raw_body.txt > raw_not.txt
+              node .github/scripts/kaynak-sec.mjs \
+                --not raw_not.txt --butce "$KAYNAK_BUTCESI" \
+                --yollar "$KAYNAK_YOLLARI" --uzantilar "$KAYNAK_UZANTILARI" \
+                --haric "${KAYNAK_HARIC:-}" --her-zaman "${KAYNAK_HER_ZAMAN:-}" \
+                --sozluk "${SOZLUK_DOSYASI:-}" > secilen.txt 2> kaynak-sec.log || : > secilen.txt
+              SAYI=0; BAYT=0
+              while read -r f; do
+                [ -n "$f" ] && [ -f "$f" ] || continue
+                SAYI=$((SAYI + 1)); BAYT=$((BAYT + $(wc -c < "$f")))
+                echo "## $f"; echo '```'; cat "$f"; echo '```'; echo
+              done < secilen.txt
+              printf '%s %s\n' "$SAYI" "$((BAYT / 1024))" > kaynak_sayim.txt
+              echo
+              echo "Yalnızca yukarıda içeriği verilen dosyaları gördün. Adı"
+              echo "listede olup içeriği verilmeyenler hakkında kesin hüküm"
+              echo "verme; gerekiyorsa şartnamede anılmasını iste." 
+            fi
+          } > prompt_onek.md
+          {
+            echo
+            echo "# Denetlenecek şartname"
+            echo "## Başlık"
+            cat raw_title.txt
+            echo "## Gövde"
+            cat raw_body.txt
+          } > prompt_sart.md
+          # Gemini yedeği ve günlük için tek parça da duruyor.
+          cat prompt_onek.md prompt_sart.md > prompt.md
+
+          SAGLAYICI=claude
+          # Kapı artık "Anthropic anahtarı var mı" değil: NVIDIA'ya gidecek bir
+          # istek Anthropic anahtarı olmadan da tamamlanabilmeli. Aksi hâlde
+          # anahtar düştüğü an ücretsiz kol da susardı.
+          GORSEL_ON=$(jq length gorseller.json)
+
+          # **Mimar hiçbir koşulda NVIDIA'ya gitmez.** 31 Ağustos'ta buraya
+          # "görsel yoksa NVIDIA" şartı konmuştu ve o karar sahibin onayından
+          # geçmemişti; yerel ajan ölçüme dayanıp kendisi vermişti. Sahip 1
+          # Eylül'de kaydı düzeltti ve mimarı Sonnet'te tuttu.
+          #
+          # Şartın kendisi de hiç çalışmadı ve bu ölçüldü: görsel indirme
+          # döngüsü sessizce düştüğü için `GORSEL_ON` her koşuda `0` okundu,
+          # yani mimar korunmak yerine her seferinde NVIDIA'ya gitti. Şart bir
+          # koruma değil, koruma görüntüsüydü.
+          #
+          # Mimarın işi **görmek**: haptik, hiyerarşi, ölçü, animasyon. Görsel
+          # taşıyamayan bir mimar olmayan bir mimardır — bu cümle bu dosyada
+          # zaten yazılıydı ve şart onu korumak için konmuştu.
+          MIMAR_NVIDIA=0
+          if [ -n "$ANTHROPIC_API_KEY" ] || { [ -n "${NVIDIA_API_KEY:-}" ] && [ "$ROL" = "muhendis" ]; }; then
+            # max_tokens iki role birden koşuyor: haiku için tavan bedava (en
+            # uzun mühendis yorumu 2.604 karakter, tavanın %6'sı); sonnet için
+            # değil — düşünme metinle aynı tavanı paylaşır ve 4.000'de yorum
+            # cümle ortasında kesiliyordu. Sonnet `thinking` alanı gönderilmese
+            # de adaptif düşünür; tavan düşünmeye göre boyutlanır, düşünme
+            # kısılmaz (sahibin kararı, 21 Ağustos 2026).
+            # İçerik blok dizisi: görseller metinden önce geliyor. Sıra
+            # önemli — model önce baktığı şeyi görüp sonra ne sorulduğunu
+            # okuduğunda bulgular görsele bağlanıyor. Görsel yoksa dizi boş
+            # kalıyor ve istek eskisiyle aynı.
+            # ÖNBELLEK KALDIRILDI — 22 Ağustos 2026, ölçümle.
+            #
+            # Bir gün açık kaldı ve defter şunu yazdı: 90.586 token yazıldı,
+            # **sıfır** okundu. Yazım girdi fiyatının 1,25 katı olduğu için bu
+            # net zarardı. Sebebi tasarımda:
+            #
+            #   - Önbelleklenen önek kaynak dökümünü içeriyordu ve döküm her
+            #     issue'da farklı; iki issue asla aynı öneki paylaşmıyor.
+            #   - Aynı issue'nun tekrarı ise parmak izi kapısıyla (B1) zaten
+            #     engellendi — yani hit üretecek tek desen kapatıldı.
+            #   - Mimar tarafında görseller içeriğin başında ve issue'ya özel;
+            #     arkasındaki her şey de otomatik olarak tekilleşiyor.
+            #
+            # Sabit belgeleri (DNA + kurallar + notlar, ~142 KB) ayırıp yalnız
+            # onları önbelleğe almak teorik olarak mümkün, ama hacim tutmuyor:
+            # günde 3 mühendis çağrısı var ve saatlerce arayla geliyor. 5
+            # dakikalık pencere hiç yakalamaz; 1 saatlik yazım 2× eder ve
+            # başabaş %52,6 isabet ister. Bu hattın hacminde önbellek bir
+            # tasarruf aracı değil, bir gider kalemi.
+            #
+            # Bu yorum silinmesin: aynı fikir üç ayda bir yeniden önerilir.
+            #
+            # Efor yalnızca Sonnet/Opus'ta tanımlı; Haiku'ya gönderilirse 400.
+            # Varsayılan `high` — sahibin kararı: düşünme kısılmıyor. Kol
+            # yalnızca görünür ve tek yerden ayarlanır olsun diye burada.
+            EFOR_JSON='{}'
+            if [ "$ROL" = "mimar" ]; then EFOR_JSON=$(jq -n --arg e "${EFOR:-high}" '{output_config:{effort:$e}}'); fi
+            # Ayrım rol bazında **değil**, isteğin görsel taşıyıp taşımadığına
+            # göre. Mühendis hiç görsel almıyor, yani her zaman NVIDIA'ya
+            # gidiyor; mimar aldığında Anthropic'te kalıyor, almadığında o da
+            # NVIDIA'ya düşüyor. Karar tek yerde; iki ayrı adım yazmak,
+            # ikisinden birinin sessizce ayrışması demekti.
+            #
+            # Ölçüm bunu istedi: son altı İç kontrol koşusunun altısında da
+            # mimar kolu `gorsel: 0 görsel` yazdı ve son kırk issue'nun
+            # gövdesinde hiç görsel yoktu. Yani mimar, saf metin bir istem
+            # için Sonnet fiyatı ödüyordu. Yukarıdaki "mimar taşınmadı"
+            # gerekçesi hâlâ geçerli ama kapsamı daralıyor: geçersiz kılan şey
+            # görselin **varlığı**, rolün adı değil.
+            if [ -n "${NVIDIA_API_KEY:-}" ] && [ "$ROL" = "muhendis" ]; then
+              SAGLAYICI=nvidia
+              # İki rol iki ayrı model. Aynı modele koymak ucuz olurdu ama
+              # #560'ın kapattığı arızayı geri açardı: tek modelin kör noktası
+              # hattın kör noktası olur. Ayrı aileler bunu bedavaya çözüyor.
+              if [ "$ROL" = "mimar" ]; then MODEL="$NVIDIA_MIMAR_MODEL"; else MODEL="$NVIDIA_MODEL"; fi
+              # OpenAI uyumlu gövde. Görsel eklenmiyor ve eklenemez de:
+              # bu kola yalnızca `gorseller.json` boşken giriliyor. Kolun
+              # görseli sessizce düşürmesi mümkün değil — düşürecek görsel
+              # olsaydı istek buraya hiç gelmezdi.
+              jq -n --rawfile onek prompt_onek.md --rawfile sart prompt_sart.md --arg m "$MODEL" \
+                '{model:$m, max_tokens:16000, temperature:0.2,
+                  messages:[{role:"user", content:($onek + "\n\n" + $sart)}]}' > req.json
+              for deneme in 1 2 3; do
+                HTTP=$(curl -sS -o resp.json -w '%{http_code}' \
+                  -X POST "https://integrate.api.nvidia.com/v1/chat/completions" \
+                  -H "Authorization: Bearer ${NVIDIA_API_KEY}" \
+                  -H 'Content-Type: application/json' \
+                  --data @req.json)
+                case "$HTTP" in
+                  429|500|502|503) [ "$deneme" -lt 3 ] && sleep $((deneme * 20)) && continue ;;
+                esac
+                break
+              done
+            else
+              jq -n --rawfile onek prompt_onek.md --rawfile sart prompt_sart.md --arg m "$MODEL" \
+                 --slurpfile g gorseller.json --argjson efor "$EFOR_JSON" \
+                '{model:$m, max_tokens:16000,
+                  messages:[{role:"user", content: ($g[0]
+                    + [{type:"text", text:$onek}]
+                    + [{type:"text", text:$sart}])}]} + $efor' > req.json
+              HTTP=$(curl -sS -o resp.json -w '%{http_code}' \
+                -X POST "https://api.anthropic.com/v1/messages" \
+                -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+                -H "anthropic-version: 2023-06-01" \
+                -H 'Content-Type: application/json' \
+                --data @req.json)
+            fi
+          else
+            # Buraya düşmenin tek yolu: Anthropic anahtarı yok, NVIDIA var, rol
+            # mimar ve istemde görsel var. Görselli mimar isteği NVIDIA'ya
+            # gidemez ve görseli düşürerek göndermek de yasak — "görselleri
+            # sessizce kaybeden bir mimar, olmayan bir mimardır". Yani bu
+            # denetim gerçekten yapılamıyor, ve aşağıdaki `HTTP != 200` kolu
+            # bunu yorum olarak yazacak.
+            #
+            # Guard bunu erkenden eleyemiyor: guard `gorseller.json`'dan önceki
+            # bir adımda koşuyor, yani o noktada görsel sayısı henüz bilinmiyor.
+            # Erken elemek için guard'ın görselleri de indirmesi gerekirdi —
+            # denetimi atlamak için indirme yapmak, atlamaktan pahalı.
+            HTTP=000
+            if [ -z "$ANTHROPIC_API_KEY" ]; then
+              echo "mimar: istemde $GORSEL_ON görsel var ve Anthropic anahtarı yok; NVIDIA görsel almıyor." >&2
+            fi
+          fi
+
+          # Mimar çağrısı `llm.sh`'den geçmiyor, yani sayacın dışındaydı.
+          # 21 Ağustos'ta ölçüldü: sayaç $2 derken konsol $60 diyordu ve
+          # farkın kaynağı buydu. Ölçülmeyen harcama olmayan harcama sanılır.
+          . .github/scripts/maliyet-yaz.sh
+          # NVIDIA cagrisi da sayaca giriyor. Ucretsiz uc noktada fatura sifir
+          # ama token sayisi sifir degil, ve iki denetciyi karsilastiracak olan
+          # sey tam olarak o sayi. Ucretsiz oldugu icin olcmemek, ayni dosyanin
+          # yukarisinda yazili hatanin tekrari olurdu.
+          if [ "$SAGLAYICI" = "nvidia" ] && [ "$HTTP" = "200" ]; then
+            maliyet_yaz "$MODEL" \
+              "$(jq -r '.usage.prompt_tokens // 0' resp.json)" \
+              "$(jq -r '.usage.completion_tokens // 0' resp.json)" 0 0
+            printf '%s · nvidia · cikti %s token\n\n' "$ROL" \
+              "$(jq -r '.usage.completion_tokens // 0' resp.json)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$SAGLAYICI" = "claude" ] && [ "$HTTP" = "200" ]; then
+            maliyet_yaz "claude/$MODEL" \
+              "$(jq -r '.usage.input_tokens // 0' resp.json)" \
+              "$(jq -r '.usage.output_tokens // 0' resp.json)" \
+              "$(jq -r '.usage.cache_creation_input_tokens // 0' resp.json)" \
+              "$(jq -r '.usage.cache_read_input_tokens // 0' resp.json)"
+            # Düşünme ölçümü: faturanın çoğu görünmeyen bloklara gidiyor.
+            # Bir hafta okunsun ki o paranın ne satın aldığı bilinsin.
+            DUSUNME=$(jq '[.content[]? | select(.type=="thinking") | (.thinking // "" | length)] | add // 0' resp.json)
+            printf '%s · çıktı %s token · düşünme metni ~%s karakter · önbellek oku %s\n\n' "$ROL" \
+              "$(jq -r '.usage.output_tokens // 0' resp.json)" "$DUSUNME" \
+              "$(jq -r '.usage.cache_read_input_tokens // 0' resp.json)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # Kredi biterse denetim tamamen susmasın: mühendis yedeğe düşer.
+          # Mimar düşmez — asıl değeri sağlayıcı çeşitliliğinde.
+          # Yedek kendiliğinden devreye girmez (bkz. .github/scripts/llm.sh):
+          # sessiz devralma, birincil sağlayıcının arızasını faturadan başka
+          # hiçbir yerde görünmez kılıyor. `LLM_YEDEK=1` ile bilerek açılır.
+          if [ "${LLM_YEDEK:-0}" = "1" ] && [ "$ROL" = "muhendis" ] && [ "$HTTP" != "200" ] && [ -n "$GEMINI_API_KEY" ]; then
+            SAGLAYICI=gemini
+            MODEL="$YEDEK_MODEL"
+            jq -n --rawfile p prompt.md \
+              '{contents:[{parts:[{text:$p}]}], generationConfig:{maxOutputTokens:16000}}' > req.json
+            for deneme in 1 2 3; do
+              HTTP=$(curl -sS -o resp.json -w '%{http_code}' \
+                -X POST "https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent" \
+                -H "x-goog-api-key: ${GEMINI_API_KEY}" \
+                -H 'Content-Type: application/json' \
+                --data @req.json)
+              case "$HTTP" in
+                429|503) [ "$deneme" -lt 3 ] && sleep $((deneme * 35)) && continue ;;
+              esac
+              break
+            done
+          fi
+
+          # Denetim düşerse sentez sonsuza dek beklerdi: hata da bir görüştür,
+          # yazılır ve akış sürer. Sessiz kalmak, kusurlu şartnameyi onaya
+          # göndermekten kötüdür.
+          if [ "$HTTP" != "200" ]; then
+            HATA=$(jq -r '.error.message // "bilinmeyen hata"' resp.json)
+            echo "API $HTTP döndü: $HATA" >&2
+            printf '_Denetim yapılamadı (%s: %s). Bu şartname denetlenmemiş sayılır._\n' "$HTTP" "$HATA" > out.md
+            printf '%s/%s (yanıt vermedi)\n' "$SAGLAYICI" "$MODEL" > kim.txt
+            exit 0
+          fi
+
+          if [ "$SAGLAYICI" = "nvidia" ]; then
+            # OpenAI uyumlu gövde. `content` okunuyor, `reasoning_content`
+            # okunmuyor: model akıl yürütürken düşünmesini ayrı alana yazıyor
+            # ve o alan bir hüküm değil. 30 Ağustos ölçümü: `max_tokens` ikisini
+            # birden kapsıyor, düşünme bütçeyi yerse `content` boş gelir —
+            # aşağıdaki `test -s` onu "yorum yok" sayar, ki doğrusu da budur.
+            jq -r '.choices[0].message.content // empty' resp.json > out.md
+            if [ "$(jq -r '.choices[0].finish_reason // "?"' resp.json)" = "length" ]; then
+              printf '\n\n> **Bu denetim yarım kaldı** (`finish_reason: length`). Metin kesilmiştir; bu şartname denetlenmemiş sayılır.\n' >> out.md
+            fi
+          elif [ "$SAGLAYICI" = "gemini" ]; then
+            jq -r '.candidates[0].content.parts[]?.text // empty' resp.json > out.md
+            # Gemini'nin kesilme işareti finishReason; stop_reason yalnızca
+            # Anthropic yolunda var. #245'te yalnızca ikincisi kapatılmıştı ve
+            # şartname gövdelerini yazan yol tam olarak buydu (#254).
+            if [ "$(jq -r '.candidates[0].finishReason // ""' resp.json)" = "MAX_TOKENS" ]; then
+              printf '\n\n> **Bu denetim yarım kaldı** (`finishReason: MAX_TOKENS`). Metin kesilmiştir; bu şartname denetlenmemiş sayılır.\n' >> out.md
+            fi
+          else
+            # Düşünen modellerde ilk blok thinking olabilir; türüne göre ayıkla.
+            jq -r '[.content[] | select(.type=="text") | .text] | join("\n")' resp.json > out.md
+            if [ "$(jq -r '.stop_reason // "?"' resp.json)" = "max_tokens" ]; then
+              printf '\n\n> **Bu denetim yarım kaldı** (`stop_reason: max_tokens`). Metin kesilmiştir; bu şartname denetlenmemiş sayılır.\n' >> out.md
+            fi
+          fi
+          # Metinsiz yanıt (düşünmede tükenen bütçe, kısa devre) denetimi
+          # düşürmemeli: sessizlik "yorum yok" sayılır, akış durmaz.
+          test -s out.md || echo "yorum yok" > out.md
+          # Yorumu kimin yazdığı yorumun kendisinde durmalı: sağlayıcı sessizce
+          # yedeğe düşerse bu, faturadan önce burada görünür.
+          printf '%s/%s\n' "$SAGLAYICI" "$MODEL" > kim.txt
+
+      - name: Yorumu bırak
+        if: steps.guard.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ inputs.issue || github.event.issue.number }}
+          ROL: ${{ matrix.rol }}
+        run: |
+          set -euo pipefail
+          if [ "$ROL" = "muhendis" ]; then PREFIX="**Mühendis-check:**"; ADI="Mühendis"; else PREFIX="**Mimar-check:**"; ADI="Mimar"; fi
+          KIM=$(cat kim.txt 2>/dev/null || echo "bilinmiyor")
+          # Kaç dosya görüldüğü yorumun altında: sıfır ya da tek dosyalık bir
+          # denetim neredeyse kördür ve "uyarı yok" damgası ona hak etmediği
+          # bir sertifika verir. Sayı her zaman basılır, ikili bayrak değil.
+          KAYNAK_SATIRI=""
+          if [ "$ROL" = "muhendis" ] && [ -f kaynak_sayim.txt ]; then
+            read -r SAYI KB < kaynak_sayim.txt
+            KAYNAK_SATIRI=" · $SAYI dosya / $KB KB kaynak görüldü"
+            if [ "$SAYI" = "0" ]; then
+              printf '\n\n> **Bu denetim kaynak kodu görmeden yapıldı** — dosya ve fonksiyon atıfları doğrulanmamıştır.\n' >> out.md
+            fi
+          fi
+          # Parmak izi yalnızca gerçek denetime yazılır: hata ve kesik yorum
+          # mühür olmaz, yoksa kredi bitik bir gün şartnameyi kalıcı kilitler.
+          MUHUR=""
+          if [ -f parmak.txt ] && ! grep -qE "Denetim yapılamadı|Bu denetim yarım kaldı" out.md; then
+            MUHUR=" · parmak:$(cat parmak.txt)"
+          fi
+          { echo "$PREFIX"; echo; cat out.md; echo; echo "---"; printf '_%s · %s%s%s_\n' "$ADI" "$KIM" "$KAYNAK_SATIRI" "$MUHUR"; } > comment.md
+          gh issue comment "$NUM" --body-file comment.md
+
+      - name: İki yorum da düştüyse sentezi tetikle
+        if: steps.guard.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ inputs.issue || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          YORUMLAR=$(gh issue view "$NUM" --json comments --jq '[.comments[].body]')
+          # Hata yorumu denetim sayılmıyor.
+          #
+          # Mühendis-check düşerse gövdeye "Denetim yapılamadı" yazıp yine
+          # `**Mühendis-check:**` önekiyle yorum bırakıyor. Buradaki sayım
+          # yalnız öneke baktığı için o hata yorumunu **başarılı bir denetim**
+          # sayıyor, sentezi tetikliyor, sentez kapıya çarpıp iç kontrolü geri
+          # çağırıyor ve döngü kapanmıyordu: 30 Ağustos akşamı #576 üzerinde on
+          # tur döndü, 13 "Denetim yapılamadı" yorumu bıraktı ve o saatte 71
+          # koşu yaktı.
+          #
+          # İfade `pipeline-sweeper.yml`'den birebir alındı; iki yerde iki ayrı
+          # sayım yazmak, ikisinden birinin sessizce ayrışması demekti.
+          #
+          # Sayım parmak izine de bağlı, ve bu tetikleyici arızanın ölçüldüğü
+          # yer: #628'de (1 Eylül 23:30:35) mimar denetimi düştü, bu adım
+          # koştu, eski sürümün mühendis yorumunu sayıp sentezi çağırdı —
+          # bu sürümün mühendis denetimi 106 saniye sonra, beş bulguyla
+          # düşecekti. Kapı "yorum var mı" diye soruyordu; sorması gereken
+          # "BU SÜRÜMÜN yorumu var mı".
+          PARMAK=$(cat parmak.txt 2>/dev/null || true)
+          if [ -z "$PARMAK" ]; then
+            echo "parmak izi okunamadı; sentez tetiklenmiyor, süpürücüye bırakılıyor" >&2
+            exit 0
+          fi
+          SAYAN='[.[] | select(startswith("%s")) | select(contains("parmak:'"$PARMAK"'")) | select(test("Bu denetim yarım kaldı|Denetim yapılamadı") | not)] | length'
+          M1=$(echo "$YORUMLAR" | jq "$(printf "$SAYAN" '**Mühendis-check:**')")
+          M2=$(echo "$YORUMLAR" | jq "$(printf "$SAYAN" '**Mimar-check:**')")
+          if [ "$M1" -ge 1 ] && [ "$M2" -ge 1 ]; then
+            gh workflow run "Gemini sentez" -f issue="$NUM" || true
+          else
+            echo "#$NUM: bu sürümün ($PARMAK) denetimi eksik (mühendis=$M1 mimar=$M2) — sentez çağrılmadı"
+          fi

@@ -1,0 +1,182 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+name: Gemini revizyon
+
+# Onay bekleyen bir şartnameye proje sahibi yorum yazdığında, şartname o
+# yoruma göre yeniden yazılır. Yorumun cevapsız kalması, sahibi aynı şeyi
+# ikinci kez yazmaya zorlar.
+#
+# Yalnızca henüz onaylanmamış issue'lar için: `agent-ready` verildikten sonra
+# yorumları mühendis kendisi okuyor.
+
+# **Bu dosya merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici çağıran deponun sarmalayıcısında duruyor; burada yalnız iş var.
+# Sebebi tek kopya: bu hattı birden çok proje kullanıyor ve doktrin bir
+# projede değişip ötekilerde eskimemeli.
+#
+# Çağıran bağlam olduğu gibi korunuyor — `github.repository`, `github.event`,
+# `github.event_name`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar
+# hepsi **çağıran deponun** değerleri.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: gemini-revise-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  revise:
+    if: >-
+      !github.event.issue.pull_request &&
+      github.event.comment.user.type != 'Bot' &&
+      !contains(github.event.issue.labels.*.name, 'agent-ready') &&
+      !contains(github.event.issue.labels.*.name, 'sende') &&
+      (contains(github.event.issue.labels.*.name, 'needs-approval') ||
+       contains(github.event.issue.labels.*.name, 'gemini'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Anahtar var mı
+        id: guard
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_FALLBACK_MODEL: ${{ vars.CLAUDE_FALLBACK_MODEL || 'claude-sonnet-5' }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "Hiçbir model anahtarı tanımlı değil." >&2
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Şartnameyi yoruma göre yeniden yaz
+        if: steps.guard.outputs.ok == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_FALLBACK_MODEL: ${{ vars.CLAUDE_FALLBACK_MODEL || 'claude-sonnet-5' }}
+          MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          # Kaynak yolları projeye aittir ve .agentrc'den gelir. Dosya yoksa
+          # geniş varsayılanlara düşülür ve uyarı basılır: eksik dosyayla koşan
+          # ajan sessizce boş bağlamla çalışmamalı.
+          VARSAYILAN_YOLLAR="src"
+          VARSAYILAN_UZANTILAR="ts tsx js jsx py rs go swift kt java c cpp h sql"
+          if [ -f .agentrc ]; then
+            . ./.agentrc
+          else
+            echo "UYARI: .agentrc yok — kaynak dökümü varsayılan yollardan alınacak." >&2
+          fi
+          KAYNAK_YOLLARI="${KAYNAK_YOLLARI:-$VARSAYILAN_YOLLAR}"
+          KAYNAK_UZANTILARI="${KAYNAK_UZANTILARI:-$VARSAYILAN_UZANTILAR}"
+
+          kaynak_dosyalari() {
+            args=()
+            for u in $KAYNAK_UZANTILARI; do
+              [ "${#args[@]}" -gt 0 ] && args+=(-o)
+              args+=(-name "*.${u}")
+            done
+            # shellcheck disable=SC2086 — yollar bilerek sözcüklere ayrılıyor
+            find $KAYNAK_YOLLARI -type f \( "${args[@]}" \) 2>/dev/null | sort
+          }
+
+          KAYNAK_LISTESI=$(kaynak_dosyalari || true)
+          if [ -z "$KAYNAK_LISTESI" ]; then
+            echo "UYARI: kaynak dökümü boş — ajan kaynak kodu görmeden karar verecek. .agentrc yollarını denetle: $KAYNAK_YOLLARI" >&2
+          fi
+
+          gh issue view "$NUM" --json title,body,comments \
+            --jq '"# Mevcut başlık\n\(.title)\n\n# Mevcut gövde\n\(.body)\n\n# Yorumlar (eskiden yeniye)\n" +
+                  ([.comments[] | "## [\(.author.login)] \(.createdAt)\n\(.body)"] | join("\n\n"))' > issue.md
+
+          # Kaynak dökümü bütçesiz basılıyordu: 191 dosya, ~1,2 MB. Kod tabanı
+          # 17 Ağustos'ta sağlayıcının dakikalık girdi tavanını aştı ve bu adım
+          # her sahip yorumunda üç kez 429 alıp sessizce öldü. Yani hattın
+          # sahibe en yakın kanalı — yorumun şartnameye işlenmesi — pratikte
+          # çalışmıyordu ve issue'ya tek satır not düşmüyordu.
+          REV_KAYNAK_BUTCESI=${REV_KAYNAK_BUTCESI:-600000}
+          node .github/scripts/kaynak-sec.mjs \
+            --not issue.md --butce "$REV_KAYNAK_BUTCESI" \
+            --yollar "$KAYNAK_YOLLARI" --uzantilar "$KAYNAK_UZANTILARI" \
+            --haric "${KAYNAK_HARIC:-}" --her-zaman "${KAYNAK_HER_ZAMAN:-}" \
+            --sozluk "${SOZLUK_DOSYASI:-}" > rev_secilen.txt
+          REV_ATLANAN=$(printf '%s\n' "$KAYNAK_LISTESI" | grep -vxF -f rev_secilen.txt || true)
+
+          {
+            echo "${GITHUB_REPOSITORY} projesinin vizyoner direktörü ve ürün"
+            echo "yöneticisisin. Aşağıdaki 'Kim olduğun' bölümü senin karakterin."
+            echo
+            echo "Onay bekleyen bir şartnameye proje sahibi yorum yazdı. Şartnameyi"
+            echo "o yorumu karşılayacak şekilde yeniden yaz."
+            echo
+            echo "## Biçim"
+            echo "- İlk satır issue başlığı; markdown başlık işareti kullanma."
+            echo "- Kalan satırlar gövde. Mevcut bölüm yapısını koru."
+            echo
+            echo "## Karar kuralları"
+            echo "- Yorum bir değişiklik istemiyorsa (onay, teşekkür, bilgi notu),"
+            echo "  hiçbir şey yazma: yalnızca NO_CHANGE yaz ve dur. Gereksiz revizyon"
+            echo "  gürültüdür."
+            echo "- **Sahibin yorumu şartnameden üstündür.** Bir maddeyi iptal ettiyse"
+            echo "  çıkar, daralttıysa daralt, yön değiştirdiyse değiştir."
+            echo "- Sonraki yorum öncekini geçersiz kılar."
+            echo "- Yorumda soru varsa gövdede cevapla; cevabı yoksa 'Açıklığa"
+            echo "  kavuşturulmalı' başlığı altında sor."
+            echo "- Yorumda değinilmeyen bölümleri olduğu gibi bırak. Bu bir yeniden"
+            echo "  yazım değil, hedefli bir revizyon."
+            echo "- Gövdenin sonuna kısa bir 'Revizyon' notu ekle: hangi yoruma göre"
+            echo "  neyin değiştiğini bir iki cümleyle yaz."
+            echo "- Belgelerin yazıldığı dilde yaz."
+            echo
+            echo "# Kim olduğun"
+            cat docs/PRODUCT-DNA.md
+            echo
+            echo "# Yol haritası"
+            cat docs/ROADMAP.md
+            echo
+            echo "# Baş mühendisin notları"
+            cat docs/ENGINEERING-NOTES.md
+            echo
+            echo "# Teknik kurallar"
+            cat CLAUDE.md
+            echo
+            echo "# Kaynak kod"
+            echo "Aşağıdakiler şartnameye ve sahibin yorumuna en ilgili görülen"
+            echo "dosyalardır, ilgi sırasıyla."
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              echo "## $f"; echo '```'; cat "$f"; echo '```'; echo
+            done < rev_secilen.txt
+            if [ -n "$REV_ATLANAN" ]; then
+              echo "## İçeriği gönderilmeyen dosyalar (yalnızca adları)"
+              printf -- '- %s\n' $REV_ATLANAN
+              echo "İçeriğini görmediğin dosya hakkında kesin hüküm verme."
+            fi
+            echo
+            cat issue.md
+          } > prompt.md
+
+          # Metin üretimi tek kapıdan geçer: birinci sağlayıcının kotası
+          # dolduğunda ikincisi devralır, akış durmaz.
+          bash .github/scripts/llm.sh prompt.md out.md 8000
+
+          if head -1 out.md | grep -q 'NO_CHANGE'; then
+            echo "Yorum şartname değişikliği gerektirmedi; gövdeye dokunulmadı."
+            exit 0
+          fi
+
+          TITLE=$(head -1 out.md | sed 's/^#\{1,6\} *//' | cut -c1-200)
+          tail -n +2 out.md > body.md
+
+          gh issue edit "$NUM" --title "$TITLE" --body-file body.md
+          gh issue comment "$NUM" --body "Şartname yorumuna göre revize edildi. Uygunsa \`agent-ready\` etiketi ekle."

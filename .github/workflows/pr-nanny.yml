@@ -1,0 +1,632 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+name: PR bakıcısı
+
+# Sahip PR'a baktığında iş çoktan hazır olmalı: inceleme istenmiş, çakışma
+# onarılmış olmalı. Birleştirme asla otomatik değildir — kapı sahibindir.
+
+# Olay önce, zamanlama yedek (#525). `*/30` günde 48 koşu ister; ölçülen
+# günde 2-7 idi. Bakıcının işi zaten olaya bağlı — bir PR'da yapılacak iş
+# ancak biri push ettiğinde, denetçi yorum yazdığında ya da main ilerlediğinde
+# doğuyor. İlk ikisi artık doğrudan tetikliyor; üçüncüsü için saatlik yedek
+# duruyor (main'e her birleşme `pull_request.closed` de üretiyor).
+# **Bu dosya merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici çağıran deponun sarmalayıcısında duruyor; burada yalnız iş var.
+# Sebebi tek kopya: bu hattı birden çok proje kullanıyor ve doktrin bir
+# projede değişip ötekilerde eskimemeli.
+#
+# Çağıran bağlam olduğu gibi korunuyor — `github.repository`, `github.event`,
+# `github.event_name`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar
+# hepsi **çağıran deponun** değerleri.
+on:
+  workflow_call:
+
+permissions: {}
+
+# Grup PR başına ayrışıyor, hat başına değil. Sabit grup işleri sıraya
+# sokmuyor, **eliyor**: GitHub bir grupta yalnız bir bekleyen koşu tutar ve
+# üçüncü koşu geldiğinde bekleyeni düşürür. 26 Ağustos 17:45'te üç PR birkaç
+# saniye arayla taslaktan çıktı ve ortadaki koşu (32995932529) tam bu yüzden
+# `cancelled` oldu — o PR'ın `inceleme` kontrolü de onunla birlikte düştü.
+#
+# `cancel-in-progress: false` bunu engellemiyor ve engellemesi de beklenmemeli:
+# o ayar **koşan** işi koruyor, bekleyeni değil.
+#
+# `run_id` yedeği takvim ve `workflow_dispatch` kollarında devreye giriyor;
+# orada PR bağlamı yok ve her koşunun kendi grubunda olması zararsız — o
+# kollar zaten tekrar tekrar koşuyor.
+concurrency:
+  group: pr-nanny-${{ github.event.pull_request.number || github.run_id }}
+  # Yarım kalan bir bakım turu hiç koşmamış turdan kötüdür: damga
+  # `durum:basladi`de asılı kalır ve PR bir sonraki tura kadar sahipsiz görünür.
+  cancel-in-progress: false
+
+env:
+  # İşaret tek yerde tanımlı, çünkü aranan satır ile yazılan satır ayrı ayrı
+  # yazıldığında kaçınılmaz olarak birbirinden ayrılıyor (ölçüldü: `IMZA_HUKUM`).
+  # Onarım kolu ile kurtarma kolu aynı sayacı paylaşıyor; ikisi de bu dizeyi
+  # okuyor.
+  IMZA_CI: '**Bakıcı:** CI koşusu bulunamadı'
+  TAVAN_CI: '5'
+
+jobs:
+  # `pull_request` olayında koşan tek iş. Yazma kapsamı yok ve olmamalı:
+  # bu olayda çalıştırılan iş akışı dosyası **PR'ın kendi sürümüdür**, yani
+  # dala yazabilen herkes bu işi değiştirebilir. `actions: write` burada
+  # dursaydı, henüz incelenmemiş bir dal gizli anahtar tüketen her
+  # `workflow_dispatch` iş akışını tetikleyebilirdi. Kapı sahibindeyken
+  # kapının anahtarını kapıdan önce vermek olurdu.
+  inceleme:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: İnceleme iste
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Bu iş `checkout` yapmıyor, yani çalışma dizininde `.git` yok.
+          # `gh pr list` ve `gh pr comment` depoyu token'dan değil git
+          # uzağından çözüyor; `GH_REPO` olmadan ikisi de "base repository
+          # belirlenemedi" ile düşer ve kol hiç koşmaz.
+          GH_REPO: ${{ github.repository }}
+          # Boşsa kapalı sayılır; iş akışı dosyasına dokunmadan açılıp
+          # kapanabilsin diye depo değişkeninden okunuyor.
+          COPILOT_DENETIM: ${{ vars.COPILOT_DENETIM }}
+          # Boşsa kapalı: tekil PR'lara denetçi çağrılmaz.
+          TEKIL_DENETIM: ${{ vars.TEKIL_DENETIM }}
+        run: |
+          set -uo pipefail
+
+          # Taslak PR'da denetçi çağrılmaz: mühendis üzerinde çalışırken her
+          # push zaten artımlı inceleme doğuruyor ve denetçinin saatlik kotası
+          # hattın hızının altında kalıyor. Denetim, iş hazır olduğunda bir kez.
+          # Liste düşerse kol boş bir dünyada koşar: döngü hiç dönmez, adım
+          # yeşil biter ve "bakılacak PR yoktu" der. Oysa bakılmadı. Boş liste
+          # ile düşmüş liste ayrı şeyler; ayıran şey çıktı değil çıkış kodu.
+          # Denetçi artık **yalnızca toplu sunum PR'ına** çağrılıyor.
+          # Sebep: denetim fiyatı PR başına, kod satırı başına değil. Aynı iş
+          # 40 parçada 40 kez, tek sunumda bir kez ödeniyor; `toplu-pr.yml`
+          # araya tam bu yüzden girdi. Tekil PR'lar denetimsiz birleşmiyor —
+          # denetim yerini değiştirdi, kaybolmadı: hepsi sunumun içinde
+          # denetleniyor.
+          #
+          # `TEKIL_DENETIM=1` eski davranışı geri getirir.
+          if [ "${TEKIL_DENETIM:-0}" = "1" ]; then
+            SUZGEC='.[] | .number'
+          else
+            SUZGEC='.[] | select(.labels | map(.name) | index("toplu")) | .number'
+          fi
+          if ! LISTE=$(gh pr list --state open --draft=false --limit 200 --json number,labels --jq "$SUZGEC" 2>/tmp/gh-hata); then
+            # Bu iş `checkout` yapmıyor (yukarıdaki gerekçe: bu olayda koşan
+            # dosya PR'ın kendi sürümü), yani `.github/scripts/kota-kapisi.sh`
+            # diskte yok ve `source` edilemez. Kapının kendisi burada dört
+            # satırla tekrarlanıyor — kolu checkout'a açmak, yazma yetkisi
+            # olmayan bu işe depo içeriği getirmek olurdu.
+            if grep -qEi 'rate limit already exceeded|rate limit exceeded|secondary rate limit' /tmp/gh-hata 2>/dev/null; then
+              echo "::warning title=Kota duvarı::PR bakıcısı · inceleme — GitHub API kotası tükendi, bu kol koşamadı"
+              [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '### Kota duvarı — `PR bakıcısı · inceleme`\n\nSebep kodda değil: API kurulum kotası tükenmiş, ilk çağrı reddedildi.\n' >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "PR listesi alınamadı — bu kol hiç koşmadı, yeşil bitmesin."
+            fi
+            exit 1
+          fi
+
+          # Kırpma görünür olmalı. `--limit` bir üst sınır koyuyor ve liste tam
+          # o sayıda dönerse kesilmiş olması muhtemel; sessiz kesim, "hepsine
+          # bakıldı" diye okunur.
+          SAYIM=$(printf '%s\n' "$LISTE" | grep -c . ) || SAYIM=0
+          [ "$SAYIM" -ge 200 ] && echo "UYARI: PR listesi 200 sınırına dayandı — bu turda bazı PR'lar görülmemiş olabilir."
+
+          for NUM in $LISTE; do
+            echo "── PR #$NUM"
+
+            # İnceleme tetiklenmiş mi? Denetçi yalnızca çağrıldığında bakar;
+            # çağrının unutulması PR'ı sessizce bekletir.
+            #
+            # Yorumlar REST ucundan `--paginate` ile okunuyor: `gh pr view
+            # --json comments` yalnızca **ilk yüz** yorumu getiriyor
+            # (`comments(first: 100)`, sayfalama döngüsü yok) ve sıralama
+            # eskiden yeniye. Kalabalık bir PR'da kendi işaretin pencerenin
+            # dışında kalır, hiç yazılmamış sanılır ve iş her turda yeniden
+            # yapılır — sessiz eksik, yanlış hükümden kötüdür.
+            #
+            # Arama boruyla beslenmiyor: `grep -q` ilk eşleşmede boruyu kapatır,
+            # yazan taraf SIGPIPE ile 141 döner ve `pipefail` bunu pipeline'ın
+            # hükmü yapar. `!` onu "eşleşme yok" sanır ve inceleme yeniden
+            # istenir. Arabellek dolmadan biten kısa geçmişlerde olmaz; yani tam
+            # da sayfalamanın gerektiği kalabalık PR'da denetçi kotası yanar.
+            # `?per_page=100` sessiz bir tasarruf değil, ölçülen bir tanesi:
+            # `gh api --paginate` sayfa boyutunu kendisi büyütmüyor ve bu uç
+            # varsayılan olarak 30 döndürüyor. 616 yorumlu bir PR'da (#550
+            # ölçüldü) 21 istek yerine 7 istek eder — aynı veri, üçte bir
+            # çağrı. Sayfalanan çağrılar kotayı sayfa başına yakıyor.
+            if YORUMLAR=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/$NUM/comments?per_page=100" \
+                            --jq '.[].body' 2>/dev/null); then
+              # Aranan sey **istegin kendisi**, ondan soz eden bir cumle degil.
+              #
+              # Bu kol yorumlarda `@coderabbitai review` dizesini duz metin
+              # olarak ariyordu. Ayni is akisinin ikinci kolu (kota uyarisi)
+              # govdesinin sonuna "Yeniden denemek icin PR a `@coderabbitai
+              # review` yaz" diye yaziyor — yani kol **kendi uyari notunu**
+              # gercek bir istek sanip bir daha hic istek atmiyordu. Kotaya
+              # takilan PR kalici olarak denetimsiz kaliyordu (#559).
+              #
+              # Cozum, istegi tek basina bir satir olarak aramak: gercek istek
+              # yorumun tamami, uyari notunda ise dize bir cumlenin icinde ve
+              # ters tirnak icinde geciyor.
+              if ! grep -Fxq -- "@coderabbitai review" <<< "$YORUMLAR"; then
+                gh pr comment "$NUM" --body "@coderabbitai review" && echo "  inceleme istendi"
+              fi
+            else
+              echo "  yorum sorgusu düştü, inceleme istenmedi"
+            fi
+
+            # Copilot artık **varsayılan olarak çağrılmıyor.** Sebep kusur
+            # değil, fiyat: 1 Haziran 2026'den beri Copilot'un kod incelemesi
+            # premium istek çarpanı **13**. Yani Pro'nun aylık 300 isteği 23
+            # inceleme, Pro+'ın 1500 isteği 115 inceleme eder. Bu hattın
+            # temposu günde 20-40 PR; ölçüldü. Pro bir günde, Pro+ dört günde
+            # biter — sahibin tahmini birebir doğru çıktı.
+            #
+            # Kota bitince istek başına $0.04, yani inceleme başına $0.52.
+            # Karşılaştırma: CodeRabbit Pro $24/ay ÷ ~600 inceleme ≈ $0.04,
+            # kendi Claude denetçimiz $0.35-0.40, hattın tamamı günde $5.52.
+            # Copilot'u her PR'a çağırmak, hattın kendisinden pahalı bir
+            # denetçiyi hattın en ucuz işine koymak olurdu.
+            #
+            # Kod silinmedi, kapıya alındı: depo değişkeni COPILOT_DENETIM=1
+            # yazıldığı gün geri döner. Karar `docs/notes/2026-08-22-
+            # copilot-inceleme-fiyati-hattin-uzerinde.md` içinde.
+            if [ "${COPILOT_DENETIM:-0}" = "1" ]; then
+              # Sorgu çıktısı boruya değil değişkene alınıyor: yukarıdaki
+              # SIGPIPE tuzağı burada da geçerli ve `!` onu "atanmamış" sanıp
+              # her turda yeniden isterdi.
+              if ISTEKLER=$(gh pr view "$NUM" --json reviewRequests \
+                              --jq '[.reviewRequests[].login] | join(" ")' 2>/dev/null); then
+                if ! grep -qi copilot <<< "$ISTEKLER"; then
+                  if printf '{"reviewers":["copilot-pull-request-reviewer[bot]"]}' \
+                       | gh api "repos/${GITHUB_REPOSITORY}/pulls/$NUM/requested_reviewers" \
+                         -X POST --input - >/dev/null 2>&1; then
+                    echo "  copilot incelemesi istendi"
+                  else
+                    echo "  copilot istenemedi (abonelik ya da yetki yok)"
+                  fi
+                fi
+              else
+                echo "  inceleme isteği sorgusu düştü, copilot istenmedi"
+              fi
+            fi
+
+          done
+
+  # Yazan ve tetikleyen her iş burada. `pull_request` olayında koşmuyor:
+  # bu işin kapsamı (`contents: write`, `actions: write`) yalnızca depoya
+  # zaten girmiş bir dosyanın koşturduğu bağlamda veriliyor — takvim ve elle
+  # tetikleme. Bedeli, açılış anında çakışma onarımının beklemesi; onu yarım
+  # saatlik takvim topluyor ve süpürücü mantığı zaten bu.
+  bakim:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      # Commit durumunu okumak için. Bu satır yokken "Denetçi hükmü gerçek mi"
+      # adımı 29 Ağustos'ta yedi PR'ın yedisinde de sustu (#548): blok yazılmayan
+      # kapsamı kapattığı için `gh api .../commits/<sha>/status` 403 dönüyordu,
+      # çağrı `2>/dev/null || echo ""` ile yutulup ACIKLAMA boş kalıyordu ve
+      # `case` boş dizeyi eşleştiremeyip sessizce `continue` ediyordu. Aynı
+      # kapsamı statü okuyan diğer iki akış (`denetci.yml`, `toplu-pr.yml`)
+      # zaten yazıyor; eksik olan yalnız buydu.
+      statuses: read
+      # `gh workflow run` olmadan dispatch 403 alır ve `|| true` yüzünden koşu
+      # yeşil biter: zincirin halkası kopar, kimse görmez. Blok yazılmayan
+      # kapsamı kapattığı için bu satır şart (bilinen tuzak).
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # `GITHUB_TOKEN` yerine PAT: otomatik token `.github/workflows/`
+          # altına hiçbir koşulda yazamaz — bu bir kapsam eksiği değil, tokenın
+          # kendisine konmuş bir sınır (`permissions:` içinde `workflows` diye
+          # bir anahtar yok ve yazılırsa dosya Actions'a geçersiz görünüp iş
+          # akışı hiç koşmuyor, #458'de ölçüldü). Sunum dalı iş akışına dokunan
+          # bir PR taşıyorsa itiş o sınıra takılıyordu; #459'un getirdiği
+          # `TOPLU_PAT` (Contents + Workflows: write) o duvarı kaldırıyor.
+          #
+          # Secret tanımlı değilse ifade boş dizeye düşer ve `checkout` kendi
+          # varsayılanına (GITHUB_TOKEN) döner: hat PAT olmadan da koşar,
+          # yalnız iş akışına dokunan PR'ları paketleyemez.
+          token: ${{ secrets.TOPLU_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Çakışmayı onar
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          source .github/scripts/kota-kapisi.sh
+          git config user.name "pr-nanny"
+          git config user.email "pr-nanny@users.noreply.github.com"
+
+          # Bu adımın tetiklediği koşular bir sonraki adımda "yok" görünebilir:
+          # ikisi aynı job'da art arda koşuyor ve dispatch'in Actions API'sinde
+          # indekslenmesi anlık değil. Numara burada bırakılıyor.
+          : > /tmp/dispatch-edildi
+
+          # **Alanlar tek sorguda isteniyor, PR başına ayrı ayrı değil.**
+          # Bu kol eskiden PR başına dört `gh pr view` atıyordu (`mergeable`,
+          # `isCrossRepository`, `headRefName`, `baseRefName`) ve dördü de aynı
+          # GraphQL düğümünün alanları. Sekiz açık PR'da tur başına 32 çağrı
+          # ediyordu; liste sorgusuna dört alan eklemek onu **sıfıra** indiriyor,
+          # çünkü liste zaten çekiliyordu. Kotayı yakan şey sorgunun pahalı
+          # olması değil, aynı veriyi parça parça istemekti (#557).
+          if ! VERI=$(gh pr list --state open --draft=false --limit 200 \
+                        --json number,mergeable,isCrossRepository,headRefName,baseRefName 2>/tmp/gh-hata); then
+            kota_kapisi "$(cat /tmp/gh-hata 2>/dev/null)" "PR bakıcısı · çakışma onarımı" \
+              || echo "PR listesi alınamadı — bu kol hiç koşmadı, yeşil bitmesin."
+            exit 1
+          fi
+          LISTE=$(printf '%s' "$VERI" | jq -r '.[].number')
+
+          SAYIM=$(printf '%s\n' "$LISTE" | grep -c . ) || SAYIM=0
+          [ "$SAYIM" -ge 200 ] && echo "UYARI: PR listesi 200 sınırına dayandı — bu turda bazı PR'lar görülmemiş olabilir."
+
+          for NUM in $LISTE; do
+            echo "── PR #$NUM"
+
+            SATIR=$(printf '%s' "$VERI" | jq -c --argjson n "$NUM" '.[] | select(.number == $n)')
+
+            # Çakışma varsa onar: tabanı dala birleştir, çözülemezse haber ver.
+            M=$(printf '%s' "$SATIR" | jq -r '.mergeable // "UNKNOWN"')
+            # Yeniden deneme yalnızca `UNKNOWN` kalanlar için — yani nadiren.
+            # Eskiden bu döngü her PR'da koşuyordu; şimdi ilk değer listeden
+            # geldiği için çoğu PR hiç ek çağrı doğurmuyor.
+            for _ in 1 2 3; do
+              [ "$M" != "UNKNOWN" ] && break
+              sleep 5; M=$(gh pr view "$NUM" --json mergeable --jq .mergeable)
+            done
+            # `UNKNOWN` "çakışma yok" değil, "henüz bilmiyorum" demektir:
+            # GitHub birleştirilebilirliği eşzamansız hesaplıyor ve yeni push
+            # almış bir PR'da değer bir süre okunamıyor — yani belirsizlik tam
+            # da çakışmanın en olası olduğu anda oluşuyor. Üç denemeden sonra
+            # hâlâ okunamıyorsa iş bir sonraki tura kalır; onarım denenmez ama
+            # "çakışma yok" da yazılmaz (#407).
+            #
+            # On satır aşağıdaki kural buydu ve çatallıkta uygulanmıştı:
+            # bilinmeyen bir değerle ilerlemek, kontrolü hiç koymamakla aynı
+            # kapıya çıkar. Eksik olan tek yer burasıydı.
+            if [ "$M" = "UNKNOWN" ]; then
+              echo "  birleştirilebilirlik okunamadı — bu tur atlandı, hüküm verilmedi"
+              continue
+            fi
+            [ "$M" != "CONFLICTING" ] && { echo "  çakışma yok ($M)"; continue; }
+
+            # Çatal PR onarılmıyor, ve kontrol fetch'ten **önce**: `origin` ana
+            # depodur, çatalın dalı burada yok. Aynı adı taşıyan bir dal varsa
+            # fetch/merge/push ilgisiz bir dalı değiştirir ve arkasından CI o
+            # dalın ucunda koşar. İkisi de sessiz ve ikisi de yanlış. Okunamayan
+            # çatallık da onarımı durduruyor: bilinmeyen bir değerle ilerlemek,
+            # kontrolü hiç koymamakla aynı kapıya çıkar.
+            CATAL=$(printf '%s' "$SATIR" \
+                      | jq -r 'if .isCrossRepository == true then 1 elif .isCrossRepository == false then 0 else "" end')
+            [ "$CATAL" = "0" ] || { echo "  çatal PR ya da çatallık okunamadı, onarılmadı"; continue; }
+
+            HEAD=$(printf '%s' "$SATIR" | jq -r '.headRefName // ""')
+            BASE=$(printf '%s' "$SATIR" | jq -r '.baseRefName // ""')
+            [ -n "$HEAD" ] && [ -n "$BASE" ] || { echo "  dal adları okunamadı, onarılmadı"; continue; }
+            git fetch origin "$HEAD" "$BASE" --quiet
+            git checkout -q "$HEAD" 2>/dev/null || git checkout -qb "$HEAD" "origin/$HEAD"
+            git reset --hard "origin/$HEAD" --quiet
+
+            if git merge "origin/$BASE" -m "Taban dal birleştirildi: çakışma bakıcı tarafından onarıldı" --quiet; then
+              if git push -q origin "$HEAD"; then
+                gh pr comment "$NUM" --body "**Bakıcı:** \`$BASE\` dala birleştirildi, çakışma temizlendi. Kod değişmedi; yalnızca taban güncellendi."
+                # `GITHUB_TOKEN` ile atılan push yeni koşu doğurmaz: PR'ın yeni
+                # SHA'sında hiçbir durum kontrolü koşmaz ve PR "bayat yeşil"
+                # değil **boş** görünür. Onarımdan sonra hüküm açıkça istenir.
+                #
+                # Deneme işareti burada da yazılıyor ve dispatch'ten **önce**.
+                # Bu dispatch sayılmazsa tavan bu yoldan aşılıyordu: onarım
+                # dispatch eder, koşu doğmazsa bir sonraki tur kurtarma kolunda
+                # `DENEME=0` ile başlar ve aynı SHA için toplam tetikleme
+                # 5 değil 6 olur. `/tmp/dispatch-edildi` yalnızca **bu koşu
+                # içinde** mükerrer tetiklemeyi eliyor; turlar arası hafıza
+                # PR'ın yorumlarında ve o hafıza SHA'ya kapsamlı.
+                YENI_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
+                if [ -n "$YENI_SHA" ]; then
+                  {
+                    printf '%s @%s — `%s` için CI elle tetikleniyor (1/%s).\n\n' \
+                      "$IMZA_CI" "$YENI_SHA" "$HEAD" "$TAVAN_CI"
+                    printf 'Taban dal birleştirildikten sonra doğan SHA için hiçbir koşu yaratılmaz '
+                    printf "(bakıcının push'u CI doğurmaz). Hüküm yine CI'dan gelir.\n"
+                  } > /tmp/ci-onarim.md
+                  gh pr comment "$NUM" --body-file /tmp/ci-onarim.md >/dev/null 2>&1 || true
+                fi
+
+                if gh workflow run ci.yml --ref "$HEAD"; then
+                  echo "$NUM" >> /tmp/dispatch-edildi
+                  echo "  onarıldı, CI tetiklendi"
+                else
+                  echo "  onarıldı ama CI tetiklenemedi — izinlere bak (actions: write)"
+                fi
+              else
+                echo "  onarıldı ama push düştü"
+              fi
+            else
+              # Yalnızca-ekleme belgelerinde iki tarafı da tutmak güvenlidir;
+              # kod çakışmasında karar mühendisindir, bakıcı zorlamaz.
+              git merge --abort
+              gh pr comment "$NUM" --body "**Bakıcı:** \`$BASE\` ile çakışma otomatik çözülemedi (kod düzeyinde). Mühendis bir sonraki turunda elle onarmalı."
+              echo "  otomatik çözülemedi"
+            fi
+            git checkout -q "$BASE" 2>/dev/null || true
+          done
+
+      - name: Hiç koşmamış CI'yi tetikle
+        # Bu kol "olay düştü" arızasını arıyor ve o teşhis ancak zamanla
+        # kurulur: PR açıldığı saniyede ci.yml'in kendi `pull_request` koşusu
+        # henüz Actions API'sinde indekslenmemiş olabilir ve `total_count=0`
+        # görünür. O an "düşmüş" ile "daha yaratılmamış" ayırt edilemez.
+        # İşin kendisi zaten `pull_request` olayında koşmuyor; süpürücü
+        # mantığı: düşen olayı yarım saatlik takvim yakalar.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          source .github/scripts/kota-kapisi.sh
+          # Açılış olayı düştüğünde CI koşusu **hiç yaratılmıyor**: iptal de
+          # atlanmış da görünmüyor, yalnızca yok. Bakıcının eski radarı
+          # çakışmaya ve denetçi hükmüne bakıyordu; sessizce duran iş tam
+          # olarak buydu.
+          #
+          # Taslaklar da taranıyor — ötekilerin aksine. Mühendis PR'ı ancak CI
+          # yeşile döndüğünde taslaktan çıkarıyor, yani hükmün hiç gelmediği
+          # taslak sonsuza kadar taslak kalır.
+          # İşaret ve tavan iş akışı düzeyinde tanımlı: onarım kolu da aynı
+          # sayaca yazıyor ve iki kol aynı dizeyi ayrı ayrı yazsaydı sayaç
+          # kendi işaretini bulamazdı (ölçüldü: `IMZA_HUKUM`).
+          IMZA="$IMZA_CI"
+          IMZA_SON='**Bakıcı:** CI tetiklenemiyor'
+          IMZA_CATAL='**Bakıcı:** Çatal PR — CI elle başlatılmalı'
+          TAVAN="$TAVAN_CI"
+
+          # Bir önceki adım çakışmayı onarıp dispatch ettiyse o koşu daha
+          # API'de görünmüyor olabilir: "hiç yok" ile "henüz indekslenmedi"
+          # burada da ayırt edilemez. Ayırt edilemeyen arıza aranmaz — mükerrer
+          # koşu yakar, deneme hakkını boşa harcar ve PR'a yanıltıcı bir yorum
+          # düşer. O PR'lar bu tura bırakılmıyor; hüküm hâlâ gelmezse yarım
+          # saat sonraki takvim koşusu onları temiz bir sayfada bulur.
+          [ -f /tmp/dispatch-edildi ] || : > /tmp/dispatch-edildi
+
+          # `--limit` şart: varsayılan otuz ve otuz birinci PR hiç görünmezdi.
+          # Düşen liste ile boş liste ayrılıyor: ilki bu kolun hiç koşmadığı
+          # anlamına gelir ve yeşil bitmemeli.
+          if ! VERI=$(gh pr list --state open --limit 200 \
+                        --json number,headRefOid,headRefName,isCrossRepository 2>/tmp/gh-hata); then
+            kota_kapisi "$(cat /tmp/gh-hata 2>/dev/null)" "PR bakıcısı · CI kurtarma" \
+              || echo "PR listesi alınamadı — bu kol hiç koşmadı, yeşil bitmesin."
+            exit 1
+          fi
+          LISTE=$(printf '%s' "$VERI" | jq -r '.[].number')
+
+          SAYIM=$(printf '%s\n' "$LISTE" | grep -c . ) || SAYIM=0
+          [ "$SAYIM" -ge 200 ] && echo "UYARI: PR listesi 200 sınırına dayandı — bu turda bazı PR'lar görülmemiş olabilir."
+
+          for N in $LISTE; do
+            if grep -qx "$N" /tmp/dispatch-edildi; then
+              echo "PR #$N: onarım sonrası bu turda tetiklendi, atlandı"
+              continue
+            fi
+
+            # Boş SHA ile devam etmenin bedeli sessiz: `head_sha=` süzgeci
+            # hiçbir şey süzmez, sayı yanlış okunur, bilinmeyen bir commit'e
+            # deneme işareti yazılır ve dispatch boş bir `--ref` ile denenir.
+            # Hakkı yakan şey arıza değil, arızanın sayılmış olması. Kontrol
+            # bu yüzden duruyor: alanlar artık listeden geliyor ama eksik
+            # gelebilirler ve eksik alan da boş dize eder.
+            SATIR=$(printf '%s' "$VERI" | jq -c --argjson n "$N" '.[] | select(.number == $n)')
+            SHA=$(printf '%s' "$SATIR" | jq -r '.headRefOid // ""')
+            HEAD=$(printf '%s' "$SATIR" | jq -r '.headRefName // ""')
+            if [ -z "$SHA" ] || [ -z "$HEAD" ]; then
+              echo "PR #$N: head bilgisi okunamadı, atlandı"
+              continue
+            fi
+
+            # Bu SHA için ci.yml'den doğmuş koşu var mı. Soru "yeşil mi"
+            # değil: kırmızı bir CI hükümdür ve tetiklenmemeli.
+            SAYI=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=$SHA" \
+                     --jq '.total_count' 2>/dev/null || echo "hata")
+
+            # Sorgunun kendisi düştüyse tetikleme yok: "bilmiyorum" ile "yok"
+            # aynı şey değil ve ikincisi sanılırsa her turda bir koşu yakılır.
+            # Boş yanıt da düşüş sayılıyor.
+            [ -z "$SAYI" ] && SAYI="hata"
+            [ "$SAYI" = "hata" ] && { echo "PR #$N: koşu sorgusu düştü, atlandı"; continue; }
+            [ "$SAYI" != "0" ] && continue
+
+            # Deneme hakkı PR'ın değil, hükmü olmayan **commit'in**. Sayaç
+            # SHA'ya kapsamlanmazsa aynı PR'da daha önce düşmüş bir olayın
+            # bıraktığı işaretler yeni commit'in hakkından düşer: ikinci arıza
+            # sıfırdan değil kalanla başlar ve "bu PR birleştirilmemeli" hükmü
+            # hak dolmadan yazılır. Çatal işareti kapsamdışı — çatallık
+            # commit'e göre değişmiyor, not PR başına bir kez yeter.
+            IMZA_SHA="$IMZA @$SHA"
+            IMZA_SON_SHA="$IMZA_SON @$SHA"
+
+            # İşaretin yazarı da sınanıyor: bakıcının yazdığı her yorum
+            # `GITHUB_TOKEN` ile atıldığı için yazarı daima `github-actions[bot]`
+            # olur ve bu kimlik taklit edilemez. Yazara bakılmazsa PR'a yorum
+            # yazabilen herkes aynı imzayı beş kez basıp deneme hakkını
+            # tüketebilir — CI kurtarması, hiç denenmeden susardı.
+            #
+            # Okuma REST ucundan ve `--paginate` ile: `gh pr view --json
+            # comments` yüzüncü yorumdan sonrasını hiç getirmiyor ve kesim
+            # sessiz. İşaretler yorum sırasının **sonunda** olduğu için ilk
+            # kurban tam da onlar olurdu: sayaç sıfırda çakılır, tavan hiç
+            # dolmaz ve yarım saatte bir sonsuza kadar dispatch edilirdi —
+            # sayacın var olma sebebinin tersi.
+            #
+            # Gövdenin yalnızca ilk satırı alınıyor: her işaret kendi
+            # yorumunun ilk satırı, yani satır sayısı yorum sayısına eşit.
+            BOT='github-actions[bot]'
+            if ! GOVDELER=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/$N/comments?per_page=100" \
+                              --jq ".[] | select(.user.login == \"$BOT\") | .body | split(\"\n\")[0]" 2>/dev/null); then
+              echo "PR #$N: yorumlar okunamadı, atlandı"
+              continue
+            fi
+            CATAL=$(printf '%s' "$SATIR" \
+                      | jq -r 'if .isCrossRepository == true then 1 elif .isCrossRepository == false then 0 else "" end')
+
+            DENEME=$(printf '%s\n' "$GOVDELER" | grep -cF -- "$IMZA_SHA") || DENEME=0
+            SON=$(printf '%s\n' "$GOVDELER" | grep -cF -- "$IMZA_SON_SHA") || SON=0
+            CATAL_NOT=$(printf '%s\n' "$GOVDELER" | grep -cF -- "$IMZA_CATAL") || CATAL_NOT=0
+
+            # Çatallık okunamadıysa tetikleme yok: bilinmeyen bir değerle
+            # ilerlemek, kontrolü hiç koymamakla aynı kapıya çıkar.
+            case "$CATAL" in
+              0|1) ;;
+              *) echo "PR #$N: çatal bilgisi okunamadı, atlandı"; continue ;;
+            esac
+
+            # Çatal PR'da dispatch edilemez: `--ref` ana depoda çözülüyor ve
+            # çatalın dalı burada yok — istek ya düşer ya da aynı adı taşıyan
+            # başka bir dalın ucunda koşar. İkincisi sessiz ve yanlış.
+            if [ "$CATAL" = "1" ]; then
+              if [ "$CATAL_NOT" = "0" ]; then
+                {
+                  printf '%s\n\n' "$IMZA_CATAL"
+                  printf 'Bu SHA için hiçbir CI koşusu yok ama PR bir çataldan geliyor: '
+                  printf '`workflow_dispatch` çatalın dalını çözemez, bu yüzden bakıcı tetiklemiyor. '
+                  printf 'Hüküm gerekiyorsa koşu elle başlatılmalı.\n'
+                } > /tmp/ci-catal.md
+                gh pr comment "$N" --body-file /tmp/ci-catal.md >/dev/null 2>&1 || true
+              fi
+              echo "PR #$N: çatal PR, dispatch edilmedi"
+              continue
+            fi
+
+            if [ "$DENEME" -ge "$TAVAN" ]; then
+              # Susmak sessiz olmamalı: sonsuza kadar denemek kadar kötü olan
+              # şey, vazgeçtiğini kimseye söylememektir. Not bir kez yazılıyor.
+              if [ "$SON" = "0" ]; then
+                {
+                  printf '%s\n\n' "$IMZA_SON_SHA"
+                  printf 'Bu SHA için hâlâ hiçbir CI koşusu yok ve %s deneme hakkı doldu; ' "$TAVAN"
+                  printf 'bakıcı artık denemiyor.\n\n'
+                  printf 'Dispatch isteği kabul edilip de koşu hiç doğmuyorsa sebep kodda değil '
+                  printf 'hesapta ya da serviste aranır: Actions dakikası, izin (`actions: write`) '
+                  printf 'ya da GitHub tarafında bir kesinti. **Bu PR birleştirilmemeli** — hükmü yok.\n'
+                } > /tmp/ci-tetik-son.md
+                gh pr comment "$N" --body-file /tmp/ci-tetik-son.md >/dev/null 2>&1 || true
+              fi
+              echo "PR #$N: $TAVAN deneme doldu, susuluyor"
+              continue
+            fi
+
+            # Deneme işareti dispatch'ten **önce** yazılıyor. Sonra yazılsaydı
+            # düşen bir dispatch hiç sayılmaz, sayaç hep sıfır kalır ve tavan
+            # asla dolmazdı — yarım saatte bir sonsuza kadar denenirdi. İşaret
+            # yazılamıyorsa dispatch de yapılmıyor: sayılamayan deneme,
+            # sayılmayan denemedir.
+            {
+              printf '%s — `%s` için CI elle tetikleniyor (%s/%s).\n\n' \
+                "$IMZA_SHA" "$HEAD" "$((DENEME + 1))" "$TAVAN"
+              printf 'Açılış olayı GitHub tarafında düşmüş olabilir: bu SHA için hiçbir koşu yaratılmamıştı. '
+              printf "Hüküm yine CI'dan gelir; bu yorum yalnızca hükmün istendiğini söyler.\n"
+            } > /tmp/ci-tetik.md
+
+            if ! gh pr comment "$N" --body-file /tmp/ci-tetik.md >/dev/null 2>&1; then
+              echo "PR #$N: deneme işareti yazılamadı, dispatch yapılmadı"
+              continue
+            fi
+
+            if gh workflow run ci.yml --ref "$HEAD"; then
+              echo "PR #$N: CI tetiklendi ($HEAD)"
+            else
+              # Sessiz düşüş yok: dispatch düşerse görünmesi gerekir. Sayaç
+              # zaten arttı, yani bu dal da tavana doğru ilerliyor.
+              #
+              # Sebep tek değil, o yüzden tek sebep yazılmıyor: 403 izin
+              # (`actions: write`) demek, 404/422 ise dalın `ci.yml`
+              # kopyasında `workflow_dispatch` bulunmaması olabilir — bu
+              # anahtar `main`'e indikten sonra açılmış ya da `main`'i almış
+              # dallarda var, daha eski dallarda yok. Yanlış tek sebep
+              # yazmak, arızayı olmadığı yerde aratır.
+              echo "PR #$N: dispatch düştü — izin (actions: write) ya da dalda workflow_dispatch yok"
+            fi
+          done
+
+      - name: Denetçi hükmü gerçek mi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          source .github/scripts/kota-kapisi.sh
+          # CodeRabbit kota sınırına takıldığında commit durumunu
+          # `state: success` / `description: "Review rate limited"` diye
+          # yazıyor. Yeşil bir tik, hiç başlamamış bir incelemeyi temsil
+          # ediyor — ve sahip birleştirme kararını o tike bakarak veriyor.
+          # Kota bizde olmadığı için denetçiyi düzeltemeyiz; yapılabilecek
+          # olan, hükmün yokluğunu PR'ın üstünde görünür kılmaktır.
+          # İşaret tek yerde tanımlı, çünkü aranan satır ile yazılan satır
+          # ayrı ayrı yazıldığında kaçınılmaz olarak birbirinden ayrılıyor:
+          # aranan `**Denetci hukmu yok**`, yazılan `**Denetci hukmu yok — yesil
+          # tike bakma.**` idi. O alt dize hiç oluşmadığı için sayaç her turda
+          # sıfır okudu ve kotaya takılmış her PR yarım saatte bir aynı notu
+          # yeniden aldı. Aynı dizeden hem yazmak hem aramak, ikisinin bir daha
+          # ayrılamaması demek.
+          IMZA_HUKUM='**Denetci hukmu yok — yesil tike bakma.**'
+
+          # Düşen liste ile boş liste ayrılıyor: ilki bu kolun hiç koşmadığı
+          # anlamına gelir ve yeşil bitmemeli.
+          if ! VERI=$(gh pr list --state open --draft=false --limit 200 \
+                        --json number,headRefOid 2>/tmp/gh-hata); then
+            kota_kapisi "$(cat /tmp/gh-hata 2>/dev/null)" "PR bakıcısı · denetçi hükmü" \
+              || echo "PR listesi alınamadı — bu kol hiç koşmadı, yeşil bitmesin."
+            exit 1
+          fi
+          LISTE=$(printf '%s' "$VERI" | jq -r '.[].number')
+
+          SAYIM=$(printf '%s\n' "$LISTE" | grep -c . ) || SAYIM=0
+          [ "$SAYIM" -ge 200 ] && echo "UYARI: PR listesi 200 sınırına dayandı — bu turda bazı PR'lar görülmemiş olabilir."
+
+          # Her dal bir satır basıyor. Bu kolun kendisi 29 Ağustos'ta arıza
+          # verdi ve teşhis edilemedi (#548), çünkü eşleşmeyen her tur sessiz
+          # `continue` ediyordu: "eşleşme olmadı" ile "sorgu düştü" log'dan
+          # ayrılamıyordu. Ayırt edilemeyen arıza aranmaz.
+          echo "Denetçi hükmü taraması: $SAYIM açık PR"
+          for N in $LISTE; do
+            SHA=$(printf '%s' "$VERI" | jq -r --argjson n "$N" '.[] | select(.number == $n) | .headRefOid // ""')
+            [ -n "$SHA" ] || { echo "PR #$N: head SHA okunamadı, atlandı"; continue; }
+
+            # stderr yutulmuyor: 403 ile "CodeRabbit statüsü yok" farkı buradan
+            # okunacak. Çağrının kendisi düşerse bu ayrı bir satır basar.
+            if ! HAM=$(gh api "repos/${GITHUB_REPOSITORY}/commits/$SHA/status" 2>&1); then
+              echo "PR #$N: commit durumu okunamadı — $(printf '%s' "$HAM" | head -1)"
+              continue
+            fi
+            ACIKLAMA=$(printf '%s' "$HAM" | jq -r '[.statuses[]? | select(.context=="CodeRabbit")] | last | .description // ""' 2>/dev/null || echo "")
+
+            case "$ACIKLAMA" in
+              *"rate limited"*|*"Rate limited"*|*"not completed"*) ;;
+              "") echo "PR #$N: CodeRabbit statüsü yok"; continue ;;
+              *)  echo "PR #$N: denetçi hükmü var ($ACIKLAMA)"; continue ;;
+            esac
+            # Aynı sayfalama kısıtı burada da geçerli: yüz yorumu geçmiş bir
+            # PR'da eski işaret görünmez ve not her turda yeniden yazılır.
+            if ! GOVDELER=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/$N/comments?per_page=100" \
+                              --jq '.[] | .body | split("\n")[0]' 2>/dev/null); then
+              echo "PR #$N: yorumlar okunamadı, atlandı"
+              continue
+            fi
+            VAR=$(grep -cF -- "$IMZA_HUKUM" <<< "$GOVDELER") || VAR=0
+            [ "$VAR" != "0" ] && { echo "PR #$N: not zaten düşülmüş ($ACIKLAMA)"; continue; }
+            {
+              printf '%s\n\n' "$IMZA_HUKUM"
+              printf 'CodeRabbit bu PR icin commit durumunu `success` yazdi, ama aciklamasi su: `%s`\n\n' "$ACIKLAMA"
+              printf 'Yani inceleme **hic yapilmadi**; yesil olan sey kotanin kendisi. Bu PR birlestirilecekse kararin dayanagi CI ve insan gozu olmali, denetci degil.\n\n'
+              printf 'Yeniden istemenin karsiligi **plana** bagli: ucretli planda `@coderabbitai review` yazmak yeni bir inceleme baslatir, ucretsiz planda sohbet komutu hic yoktur ve istek reddedilir. Denetci hangi planda oldugunu her yorumunun `Run configuration` blogunda yaziyor.\n'
+            } > /tmp/hukum.md
+            gh pr comment "$N" --body-file /tmp/hukum.md >/dev/null 2>&1 || true
+            echo "PR #$N: denetci hukmu yok ($ACIKLAMA)"
+          done

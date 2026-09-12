@@ -1,0 +1,97 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+#
+# Hattın kendi faturasını görmesi. Her LLM çağrısı token sayısını koşu
+# kaydına yazıyor (llm.sh → "MALIYET|..."); bu iş akışı günde bir kez son
+# günün kayıtlarını tarayıp docs/MALIYET.md'yi yeniden üretiyor.
+#
+# Neden günde bir: toplayıcı koşu kayıtlarını indiriyor, bu ucuz değil.
+# Anlık rakama ihtiyaç olan yer koşunun kendi özeti — llm.sh her çağrının
+# token'ını oraya da yazıyor, Actions ekranında hemen görünüyor.
+name: Maliyet sayacı
+
+# **Bu dosya artık merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici (cron, dispatch) çağıran deponun sarmalayıcısında duruyor;
+# burada yalnız iş var. Sebebi tek kopya: bu hattı birden çok proje kullanıyor
+# ve doktrin bir projede değişip ötekilerde eskimemeli.
+#
+# Çağıran taraftan gelen bağlam olduğu gibi korunuyor: `github.repository`,
+# `github.event`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar hepsi
+# **çağıran deponun** değerleri. Yani bu dosya hangi projeden çağrılırsa o
+# projenin kayıtlarına bakar.
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: maliyet
+  cancel-in-progress: false
+
+jobs:
+  topla:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Koşu kayıtlarından token satırlarını topla
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          # Pencere cron aralığından (24s) bilerek geniş: kaçırılan koşu bir
+          # daha okunmaz, iki kez okunan koşu ise defterde koşu kimliğiyle
+          # anahtarlı olduğu için zararsızdır.
+          SINIR=$(date -u -d '25 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+          : > ham.txt
+
+          # Kendi koşumuzu ve kayıtları süresi dolmuş olanları atlıyoruz.
+          # Kayıt indirilemezse o koşu sessizce geçilir: sayaç, saydığı şeyi
+          # bozamaz — eksik sayması yanlış saymasından iyidir.
+          gh run list --limit 800 \
+            --json databaseId,name,conclusion,status,createdAt,startedAt,updatedAt \
+            --jq "[.[] | select(.createdAt > \"$SINIR\")]" > kosular.json
+
+          # Tavan sessiz kalmasın: 300 koşu tek günde dolabilir ve o zaman
+          # sayaç eksik sayar. Eksik saydığını söylemeyen sayaç, yanlış sayar.
+          TOPLAM=$(gh run list --limit 800 --json createdAt --jq "[.[] | select(.createdAt > \"$SINIR\")] | length")
+          if [ "$TOPLAM" -ge 800 ]; then
+            echo "UYARI: koşu listesi tavana dayandı ($TOPLAM); pencere daraltılmalı" >&2
+          fi
+
+          KOSULAR=$(jq -r '.[] | select(.name != "Maliyet sayacı") | .databaseId' kosular.json)
+
+          SAYI=0
+          for id in $KOSULAR; do
+            gh run view "$id" --log 2>/dev/null \
+              | grep -o 'MALIYET|[^[:space:]]*' >> ham.txt || true
+            SAYI=$((SAYI + 1))
+          done
+          echo "maliyet: $SAYI koşu tarandı, $(grep -c . ham.txt || echo 0) satır bulundu"
+
+      - name: Defteri ve sayfayı güncelle
+        env:
+          # Gemini fiyatı ilk gerçek faturadan okunup buraya yazılacak
+          # (milyon token başına dolar). Boşken sayfa token'ı gösterir,
+          # dolar sütununa "—" koyar — uydurma rakam basmaz.
+          GEMINI_GIRDI: ${{ vars.GEMINI_GIRDI }}
+          GEMINI_CIKTI: ${{ vars.GEMINI_CIKTI }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/maliyet-topla.mjs \
+            --ham ham.txt --kosular kosular.json \
+            --tsv docs/maliyet.tsv --kosu-tsv docs/kosular.tsv --kanal docs/kanallar.tsv \
+            --md docs/MALIYET.md --html docs/maliyet.html
+          rm -f ham.txt kosular.json
+
+      - name: İşle
+        run: |
+          set -euo pipefail
+          git config user.name 'maliyet-sayaci[bot]'
+          git config user.email 'maliyet-sayaci@users.noreply.github.com'
+          git add docs/MALIYET.md docs/maliyet.tsv docs/kosular.tsv docs/maliyet.html
+          git diff --cached --quiet && { echo 'değişiklik yok'; exit 0; }
+          git commit -m 'Maliyet sayacı güncellendi'
+          git push

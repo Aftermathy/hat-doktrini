@@ -1,0 +1,199 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+name: Danışman deneyi
+
+# Ne ölçülüyor
+#
+# Mimar denetimi bugün claude-sonnet-5'te tek başına koşuyor ve günde
+# onlarca kez çağrılıyor. Danışman aracı (beta) başka bir düzen öneriyor:
+# ucuz bir **yürütücü** işi yapar, pahalı bir **danışmana** yalnızca strateji
+# sorar. Fatura ikiye ayrılır ve üretimin çoğu ucuz tarafta kalır.
+#
+# Bu iş akışı üç düzeni AYNI girdiyle koşturup token'larını yan yana koyuyor:
+#
+#   A  sonnet-5 tek başına            — bugünkü düzen, taban
+#   B  haiku-4-5 + sonnet-5 danışman  — önerilen düzen
+#   C  haiku-4-5 tek başına           — taban çizgisi, kalite tavanı değil
+#   D  haiku-4-5 + fable-5 danışman   — kalite tavanı, fiyatı ölçülecek
+#
+# Karar rakama bakılarak verilecek. B, A'nın maliyetinin altında kalıp
+# çıktısı C'den belirgin iyiyse geçilir; değilse geçilmez.
+#
+# TUZAK — deneyin kendisi de ölçülüyor: danışmanın token'ları üst düzey
+# `usage` alanlarına DAHİL DEĞİL. `usage.iterations[]` içinde, tür
+# `advisor_message` olarak duruyorlar. Sadece üst düzeye bakan bir sayaç
+# danışman harcamasını göremez — bugün mimar denetimlerinde düzelttiğimiz
+# körlüğün aynısı, farklı kılıkta.
+
+# **Bu dosya merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici çağıran deponun sarmalayıcısında duruyor; burada yalnız iş var.
+# Sebebi tek kopya: bu hattı birden çok proje kullanıyor ve doktrin bir
+# projede değişip ötekilerde eskimemeli.
+#
+# Çağıran bağlam olduğu gibi korunuyor — `github.repository`, `github.event`,
+# `github.event_name`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar
+# hepsi **çağıran deponun** değerleri.
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: "Girdi olarak kullanılacak PR"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dene:
+    runs-on: ubuntu-latest
+    # Dört çağrı, her biri en çok 7 dakika. Bunun üstü asılı kalmadır.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Üç düzeni karşılaştır
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR: ${{ github.event.inputs.pr }}
+        run: |
+          set -uo pipefail
+          SHA=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+          TABAN=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
+          echo "$(date -u +%H:%M:%S) fark hazırlanıyor"
+          # PR'ın başı dal silinmiş olsa da pull/N/head üzerinden çekilebilir;
+          # birleşmiş bir PR'a bakarken "bad object" ile düşmemenin tek yolu bu.
+          git fetch origin "$TABAN" "pull/$PR/head:deney-pr" >/dev/null 2>&1 || { echo "PR #$PR çekilemedi"; exit 1; }
+          SHA=$(git rev-parse deney-pr)
+          ORTAK=$(git merge-base "origin/$TABAN" "$SHA" 2>/dev/null || echo "origin/$TABAN")
+          git diff -U15 "$ORTAK" "$SHA" -- . ':(exclude)package-lock.json' | head -c 120000 > fark.txt
+
+          {
+            echo "(Advisor: keep your guidance under 120 words — name the 3-4 riskiest spots in this diff and what would break; the executor writes the findings.)"
+            echo
+            echo "Bu deponun denetçisisin. Görevin kusur bulmak."
+            echo
+            sed -n '1,120p' CLAUDE.md
+            echo
+            echo "Giriş cümlesi yok, özet yok. En fazla 6 bulgu, her biri üç satır:"
+            echo "\`dosya:satır\` — kusur — hangi girdide patlar."
+            echo
+            echo '```diff'
+            cat fark.txt
+            echo '```'
+          } > prompt.md
+          echo "prompt: $(wc -c < prompt.md) bayt"
+
+          # `iterations[]` varsa oradan, yoksa üst düzeyden topla. İki
+          # düzenin faturası aynı yerden okunmazsa karşılaştırma anlamsız.
+          rapor() {
+            local ad="$1" dosya="$2"
+            jq -r --arg ad "$ad" '
+              (.usage.iterations // []) as $it
+              | (if ($it | length) > 0
+                 then $it
+                 else [{type:"message", input_tokens:(.usage.input_tokens//0), output_tokens:(.usage.output_tokens//0)}]
+                 end)
+              | group_by(.type)
+              | map({tur: .[0].type,
+                     girdi: (map(.input_tokens // 0) | add),
+                     cikti: (map(.output_tokens // 0) | add)})
+              | .[] | "\($ad)\t\(.tur)\t\(.girdi)\t\(.cikti)"
+            ' "$dosya"
+          }
+
+          cagir() {
+            local etiket="$1" govde="$2" dosya="$3" ekbaslik="${4:-}"
+            local kod
+            if [ -n "$ekbaslik" ]; then
+              kod=$(curl -sS --max-time 420 -o "$dosya" -w '%{http_code}' -X POST https://api.anthropic.com/v1/messages \
+                -H "x-api-key: ${ANTHROPIC_API_KEY}" -H 'anthropic-version: 2023-06-01' \
+                -H "anthropic-beta: $ekbaslik" -H 'Content-Type: application/json' --data @"$govde")
+            else
+              kod=$(curl -sS --max-time 420 -o "$dosya" -w '%{http_code}' -X POST https://api.anthropic.com/v1/messages \
+                -H "x-api-key: ${ANTHROPIC_API_KEY}" -H 'anthropic-version: 2023-06-01' \
+                -H 'Content-Type: application/json' --data @"$govde")
+            fi
+            if [ "$kod" != "200" ]; then
+              echo "$etiket DÜŞTÜ ($kod): $(jq -r '.error.message // "?"' "$dosya" | head -c 200)"
+              return 1
+            fi
+            return 0
+          }
+
+          : > olcum.tsv
+
+          # A — bugünkü düzen
+          jq -n --rawfile p prompt.md '{model:"claude-sonnet-5", max_tokens:16000,
+            messages:[{role:"user", content:$p}]}' > a.json
+          echo "$(date -u +%H:%M:%S) düzen A başlıyor"
+          cagir A a.json ra.json && rapor "A sonnet-solo" ra.json >> olcum.tsv
+
+          # B — yürütücü haiku, danışman sonnet. max_uses:2 tavanı deneyin
+          # kendisini kaçak harcamaya çeviremesin diye.
+          jq -n --rawfile p prompt.md '{model:"claude-haiku-4-5-20251001", max_tokens:16000,
+            tools:[{type:"advisor_20260301", name:"advisor", model:"claude-sonnet-5", max_uses:2, max_tokens:2048}],
+            tool_choice:{type:"tool", name:"advisor"},
+            messages:[{role:"user", content:$p}]}' > b.json
+          echo "$(date -u +%H:%M:%S) düzen B başlıyor"
+          cagir B b.json rb.json advisor-tool-2026-03-01 && rapor "B haiku+danisman" rb.json >> olcum.tsv
+
+          # C — taban çizgisi
+          jq -n --rawfile p prompt.md '{model:"claude-haiku-4-5-20251001", max_tokens:16000,
+            messages:[{role:"user", content:$p}]}' > c.json
+          echo "$(date -u +%H:%M:%S) düzen C başlıyor"
+          cagir C c.json rc.json && rapor "C haiku-solo" rc.json >> olcum.tsv
+
+          # D — yürütücü haiku, danışman fable-5. Belgenin sözü: "Fable kalite
+          # sıçramasını en üste çıkarır". Sorusu şu: o sıçrama neye mal oluyor?
+          jq -n --rawfile p prompt.md '{model:"claude-haiku-4-5-20251001", max_tokens:16000,
+            tools:[{type:"advisor_20260301", name:"advisor", model:"claude-fable-5", max_uses:2, max_tokens:2048}],
+            tool_choice:{type:"tool", name:"advisor"},
+            messages:[{role:"user", content:$p}]}' > d.json
+          echo "$(date -u +%H:%M:%S) düzen D başlıyor"
+          cagir D d.json rd.json advisor-tool-2026-03-01 && rapor "D haiku+fable" rd.json >> olcum.tsv
+
+          FIYAT_SONNET_G=3;  FIYAT_SONNET_C=15
+          FIYAT_FABLE_G=10;  FIYAT_FABLE_C=50
+          FIYAT_HAIKU_G=1;   FIYAT_HAIKU_C=5
+
+          {
+            echo "## Danışman deneyi — PR #$PR"
+            echo
+            echo "| Düzen | Katman | Girdi | Çıktı | Maliyet |"
+            echo "|---|---|---|---|---|"
+            awk -F'\t' -v sg=$FIYAT_SONNET_G -v sc=$FIYAT_SONNET_C -v hg=$FIYAT_HAIKU_G -v hc=$FIYAT_HAIKU_C -v fg=$FIYAT_FABLE_G -v fc=$FIYAT_FABLE_C '
+              {
+                # advisor_message sonnet fiyatından, message düzenin kendi modelinden.
+                if ($2 == "advisor_message" && $1 ~ /fable/) { g=fg; c=fc }
+                else if ($2 == "advisor_message") { g=sg; c=sc }
+                else if ($1 ~ /^A /)         { g=sg; c=sc }
+                else                          { g=hg; c=hc }
+                usd = $3/1e6*g + $4/1e6*c
+                toplam[$1] += usd
+                printf "| %s | %s | %d | %d | $%.4f |\n", $1, $2, $3, $4, usd
+              }
+              END { print "|  |  |  |  |  |"
+                    for (k in toplam) printf "| **%s** | **toplam** |  |  | **$%.4f** |\n", k, toplam[k] }
+            ' olcum.tsv
+            echo
+            echo
+            echo "Danışman çağrısı: B=$(jq '[.usage.iterations[]?|select(.type=="advisor_message")]|length' rb.json 2>/dev/null || echo 0) · D=$(jq '[.usage.iterations[]?|select(.type=="advisor_message")]|length' rd.json 2>/dev/null || echo 0) · kesildi: B=$(jq -r '[.content[]?|select(.type=="advisor_tool_result")|.content.stop_reason // "-"]|join(",")' rb.json 2>/dev/null) D=$(jq -r '[.content[]?|select(.type=="advisor_tool_result")|.content.stop_reason // "-"]|join(",")' rd.json 2>/dev/null)"
+            echo
+            echo "### Çıktılar"
+            for x in a:ra.json b:rb.json c:rc.json d:rd.json; do
+              ad="${x%%:*}"; f="${x#*:}"
+              [ -f "$f" ] || continue
+              echo; echo "<details><summary>$ad</summary>"; echo
+              jq -r '[.content[]? | select(.type=="text") | .text] | join("\n")' "$f" | head -c 4000
+              echo; echo "</details>"
+            done
+          } > rapor.md
+          # Özet sekmesi API'den okunamıyor; rapor günlüğe de düşüyor ki
+          # sonuç elle açmadan toplanabilsin.
+          cat rapor.md >> "$GITHUB_STEP_SUMMARY"
+          echo "═══ RAPOR ═══"; cat rapor.md; echo "═══ SON ═══"

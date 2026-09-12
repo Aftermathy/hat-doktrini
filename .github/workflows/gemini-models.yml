@@ -1,0 +1,41 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+name: Gemini modellerini listele
+
+# Hangi modellerin anahtara açık olduğunu tahmin etmek yerine sormak için.
+# Sonucu `GEMINI_MODEL` repo değişkenine yazarak Gemini PM'in modelini değiştir.
+
+# **Bu dosya merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici çağıran deponun sarmalayıcısında duruyor; burada yalnız iş var.
+# Sebebi tek kopya: bu hattı birden çok proje kullanıyor ve doktrin bir
+# projede değişip ötekilerde eskimemeli.
+#
+# Çağıran bağlam olduğu gibi korunuyor — `github.repository`, `github.event`,
+# `github.event_name`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar
+# hepsi **çağıran deponun** değerleri.
+on:
+  workflow_call:
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - name: İçerik üretebilen modeller
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          curl -sS "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200" \
+            -H "x-goog-api-key: ${GEMINI_API_KEY}" > models.json
+
+          if ! jq -e '.models' models.json >/dev/null 2>&1; then
+            echo "Beklenmeyen yanıt:" >&2
+            jq -r '.error.message // .' models.json >&2
+            exit 1
+          fi
+
+          jq -r '
+            .models[]
+            | select(.supportedGenerationMethods // [] | index("generateContent"))
+            | "\(.name | sub("^models/";""))\t\(.displayName)"
+          ' models.json | sort

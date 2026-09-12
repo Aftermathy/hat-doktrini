@@ -1,0 +1,258 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+name: Harita bekçisi
+
+# Yol haritasını PR'lar güncellemez, bu iş akışı günceller.
+#
+# Sebebi ölçülmüş bir arızadır: son 15 PR'ın 14'ü ROADMAP.md'ye dokunuyordu.
+# Paralel giden altı PR aynı dosyanın aynı bölgesine yazınca ilki birleştiği
+# anda kalan beşi çakışıyor ve sahibin tek onayı beş onarım işi doğuruyordu.
+# Tek yazar varsa çakışma da yoktur. Bu iş mekaniktir ve LLM'e verilmez:
+# birleşen PR'ın kapattığı issue numarası haritada aranır, satır işaretlenir.
+#
+# Bekçi iki şey yapar ve ikisi de tahmin etmez:
+#
+#   1. `Closes #N` atfı — haritada o numarayı taşıyan **bekleyen** satır
+#      işaretlenir. Numara hiçbir satırda geçmiyorsa dokunulmaz.
+#   2. `harita: sabit-karar | <karar> | <gerekçe>` satırı — "Sabit kararlar"
+#      tablosuna yeni bir satır eklenir. PR gövdesinde böyle bir satır yoksa
+#      yapacak iş yoktur.
+#
+# İkincisi olmadan haritaya **yeni içerik** yazacak bir yol kalmıyordu: bekçi
+# yalnızca var olan bir satırı işaretleyebiliyor, mühendis ise haritaya
+# dokunamıyor (kural). Arada kalan karar notta kalıyordu ve not arşivdir.
+#
+# İşaret görünür bir satırdır, HTML yorumu değil. Sebebi ölçülmüş: bulut
+# mühendisinin PR gövdesini yazdığı araç katmanı `<!-- … -->` bloklarını
+# temizliyor, API 200 dönüyor ve geri okunduğunda işaretin yerinde yalnızca
+# boş satır duruyor (#424, #420 üzerinde ölçüldü). Görünmeyen işaret hayatta
+# kalmıyor; bedeli bir satırlık teknik gürültü, karşılığı çalışan bir yol.
+
+# Elle tetikleme bir kurtarma yolu ve gövdeyi kendisi bulmak zorunda:
+# `workflow_dispatch` olayında `github.event.pull_request` yoktur, yani gövde
+# boş kalır ve bekçi hiçbir işareti okumaz. Koşu yine de yeşil biter ve
+# "atıf yok" der — arıza, hata gibi değil **yapacak iş yokmuş** gibi görünür.
+# Numara girdisi bu körlüğü kapatıyor; girdi de verilmediyse koşu bunu
+# günlüğe ve özet sayfasına açıkça yazar, sessiz kalmaz.
+# **Bu dosya merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici çağıran deponun sarmalayıcısında duruyor; burada yalnız iş var.
+# Sebebi tek kopya: bu hattı birden çok proje kullanıyor ve doktrin bir
+# projede değişip ötekilerde eskimemeli.
+#
+# Çağıran bağlam olduğu gibi korunuyor — `github.repository`, `github.event`,
+# `github.event_name`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar
+# hepsi **çağıran deponun** değerleri.
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: "Gövdesi okunacak PR numarası"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+# Grup **olaya özel**, hat başına tek grup değil. Sabit bir ad işleri sıraya
+# sokmuyor, düşürüyor: GitHub bir grupta yalnız bir bekleyen koşu tutar ve
+# fazlası iptal edilir. Bu iş akışı tek seferlik ve olaya özgü yük taşıyor —
+# birleşen PR'ın gövdesi — yani iptal edilen koşunun taşıdığı karar bir daha
+# hiç işlenmez. Ölçüldü (#495, 25 Ağustos 20:32): dört eşzamanlı koşunun ikisi
+# `cancelled` düştü. `docs/AGENT-WORKFLOW.md` bu tuzağı bekçiyi adıyla anarak
+# yazıyordu; düzeltme koda inmemişti.
+concurrency:
+  group: roadmap-keeper-${{ github.event.pull_request.number || inputs.pr || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  keep:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Gövde iki yoldan gelebiliyor ve sıra önemli: olay gövdesi varsa o
+      # kullanılıyor — otomatik yolun davranışı hiç değişmiyor. Yalnızca boş
+      # kaldığında girdideki numaraya bakılıyor.
+      #
+      # Gövde dosyaya yazılıyor, `GITHUB_ENV`'e değil: PR açıklaması dışarıdan
+      # yazılan bir metin ve çok satırlı `GITHUB_ENV` yazımı kendi ayırıcısını
+      # metnin içinde taşıyabilecek bir gövdeyle kırılır.
+      - name: PR gövdesini çöz
+        id: govde
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLAY_GOVDE: ${{ github.event.pull_request.body }}
+          OLAY_PR: ${{ github.event.pull_request.number }}
+          GIRDI_PR: ${{ inputs.pr }}
+        run: |
+          set -uo pipefail
+          DOSYA="$RUNNER_TEMP/pr-govde.txt"
+          : > "$DOSYA"
+          # Olaydan gelen numara, gövdenin okunup okunmadığından bağımsız:
+          # açıklaması boş olan bir PR de kapanabiliyor ve o koşuda numara
+          # biliniyor. Numarayı yalnızca gövde dolduğunda atamak, aşağıdaki
+          # uyarıya "numara da sağlanmadı" dedirtirdi — arıza yanlış yerde
+          # aranırdı.
+          PR_NO="${OLAY_PR:-}"
+
+          if [ -n "$OLAY_GOVDE" ]; then
+            printf '%s' "$OLAY_GOVDE" > "$DOSYA"
+            PR_NO="$OLAY_PR"
+            echo "Gövde olaydan okundu (PR #$PR_NO)."
+          elif [ -n "$GIRDI_PR" ]; then
+            # Numara `gh`'ye argüman olarak gidiyor; rakam dışı bir girdi
+            # burada durduruluyor ki hata komutun içinde değil kapıda görünsün.
+            case "$GIRDI_PR" in
+              ''|*[!0-9]*)
+                echo "::error::Geçersiz PR numarası girdisi: $GIRDI_PR"
+                exit 1
+                ;;
+            esac
+            if ! gh pr view "$GIRDI_PR" --json body -q .body > "$DOSYA"; then
+              echo "::error::PR #$GIRDI_PR gövdesi okunamadı."
+              exit 1
+            fi
+            PR_NO="$GIRDI_PR"
+            echo "Gövde PR #$PR_NO üzerinden çekildi."
+          fi
+
+          echo "pr=$PR_NO" >> "$GITHUB_OUTPUT"
+
+          if [ ! -s "$DOSYA" ]; then
+            # Sessizce "yapacak iş yoktu" demek, bu hattın kendi doktrininde
+            # adı konmuş bir arıza sınıfı: hiçbir şey yapmayan bir adım,
+            # kırmızı bir adımdan kötüdür. Uyarı hem günlükte hem özette.
+            #
+            # İki ayrı sebep, iki ayrı cümle: numara biliniyorsa gövde
+            # gerçekten boştur (yapacak iş yok) — numara da yoksa bekçi elle
+            # girdisiz tetiklenmiştir ve **kurtarılabilir** bir koşudur.
+            # Tek cümle ikincisini birincinin arkasına saklardı.
+            if [ -n "$PR_NO" ]; then
+              MESAJ="PR #$PR_NO gövdesi boş olduğu için harita güncellemesi atlandı."
+            else
+              MESAJ="PR gövdesi veya numarası sağlanmadığı için harita güncellemesi atlandı."
+            fi
+            echo "::warning::$MESAJ"
+            echo "$MESAJ" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Kapanan maddeleri işaretle ve yeni sabit kararları haritaya yaz
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOVDE_DOSYA: ${{ runner.temp }}/pr-govde.txt
+          PR_NO: ${{ steps.govde.outputs.pr }}
+        run: |
+          set -uo pipefail
+          DEGISTI=0
+          GOVDE=$(cat "$GOVDE_DOSYA")
+
+          # --- 1. `Closes #N` atıfları ------------------------------------
+          NUMARALAR=$(printf '%s' "$GOVDE" | grep -oiE '(closes|fixes|resolves) +#[0-9]+' | grep -oE '[0-9]+' | sort -u || true)
+          if [ -z "$NUMARALAR" ]; then
+            echo "Kapatılan issue atfı yok."
+          fi
+          for N in $NUMARALAR; do
+            # Yalnızca bekleyen (⏳) satırlar işaretlenir. Bir maddenin
+            # numarası satırda geçmiyorsa dokunulmaz — tahmin edilmez.
+            if grep -qE "^- ⏳.*#${N}\b" docs/ROADMAP.md; then
+              sed -i -E "s/^- ⏳(.*#${N}\b)/- ✅\1/" docs/ROADMAP.md
+              echo "#${N}: haritada ✅ yapıldı"
+              DEGISTI=1
+            else
+              echo "#${N}: haritada bekleyen satır bulunamadı, dokunulmadı"
+            fi
+          done
+
+          # --- 2. `harita: sabit-karar | <karar> | <gerekçe>` satırları ----
+          # Satır `code` işaretiyle yazılabilir. Sarmalama yalnızca **tam**
+          # olduğunda kaldırılıyor — açılış ve kapanış ters tırnağı bağımsız
+          # silinseydi, sarılmadan yazılmış ve gerekçesi bir `kod` ifadesiyle
+          # biten bir işaretin son karakteri sessizce düşerdi.
+          ISARETLER=$(mktemp)
+          printf '%s\n' "$GOVDE" | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*`(.*)`[[:space:]]*$/\1/; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+            | grep -E '^harita: sabit-karar[[:space:]]*\|' > "$ISARETLER" || true
+
+          # Tekilleştirme haritanın **tamamında** aranmıyor: `| metin |` deseni
+          # başka bir tablonun satırına ya da bu tablonun kendi başlığına
+          # (`| Karar | Gerekçe |`) da uyar ve geçerli bir karar sessizce
+          # atlanırdı. Arama alanı "Sabit kararlar" tablosunun veri satırları.
+          BASLIK=$(grep -n '^## Sabit kararlar' docs/ROADMAP.md | head -1 | cut -d: -f1)
+          MEVCUT=$(mktemp)
+          if [ -n "$BASLIK" ]; then
+            awk -v b="$BASLIK" 'NR>b { if ($0 ~ /^## /) exit; if ($0 ~ /^\|/) print }' docs/ROADMAP.md \
+              | tail -n +2 \
+              | grep -vE '^\|[[:space:]:|-]*$' > "$MEVCUT" || true
+          fi
+
+          SATIRLAR=$(mktemp)
+          while IFS= read -r ISARET; do
+            [ -z "$ISARET" ] && continue
+            # Alanlar sekme ile taşınıyor; metnin içinde sekme varsa taşıma
+            # bozulur ve kararın kuyruğu gerekçeye kayar. Sessizce bozuk bir
+            # satır yazmaktansa işaret eleniyor.
+            case "$ISARET" in
+              *"$(printf '\t')"*) echo "İşaret atlandı (sekme içeriyor): $ISARET"; continue ;;
+            esac
+            # Üç alan: önek, karar, gerekçe. Ayırıcı ` | ` olduğu için alan
+            # metninde düz `|` kullanılamaz — tabloyu da bozardı.
+            ALANLAR=$(printf '%s' "$ISARET" | awk -F'[[:space:]]*\\|[[:space:]]*' 'NF==3 { printf "%s\t%s", $2, $3 }')
+            if [ -z "$ALANLAR" ]; then
+              echo "İşaret atlandı (üç alan bekleniyordu): $ISARET"
+              continue
+            fi
+            KARAR=${ALANLAR%%$'\t'*}
+            GEREKCE=${ALANLAR#*$'\t'}
+            if [ -z "$KARAR" ] || [ -z "$GEREKCE" ]; then
+              echo "İşaret atlandı (boş alan): $ISARET"
+              continue
+            fi
+            # Biçimi *anlatan* metin işaretin kendisine benziyor: bu iş akışının
+            # ve belgelerin içindeki `<karar>` gibi yer tutucular tabloya
+            # girmemeli. Gevşek bir ayrıştırıcı kendi belgesini karar sanardı.
+            case "$KARAR$GEREKCE" in
+              *'<'*'>'*) echo "İşaret atlandı (yer tutucu): $ISARET"; continue ;;
+            esac
+            # Aynı karar ikinci kez yazılmaz. İki yere birden bakılıyor:
+            # haritada zaten duruyorsa (bekçi elle de tetiklenebiliyor) ve bu
+            # turda kuyruğa girmişse — aynı gövdede iki özdeş işaret tabloya
+            # iki satır yazardı.
+            if grep -Fq "| $KARAR |" "$MEVCUT" || grep -Fq "| $KARAR |" "$SATIRLAR"; then
+              echo "Karar zaten haritada ya da bu turda kuyrukta: $KARAR"
+              continue
+            fi
+            printf '| %s | %s |\n' "$KARAR" "$GEREKCE" >> "$SATIRLAR"
+          done < "$ISARETLER"
+
+          if [ -s "$SATIRLAR" ]; then
+            # Tablonun sonu aranır, başlığın altındaki ilk satır değil: yeni
+            # karar en alta yazılır ve var olan satırların sırası korunur.
+            SON=0
+            if [ -n "$BASLIK" ]; then
+              SON=$(awk -v b="$BASLIK" 'NR>b { if ($0 ~ /^## /) exit; if ($0 ~ /^\|/) s=NR } END { print s+0 }' docs/ROADMAP.md)
+            fi
+            if [ "$SON" = "0" ]; then
+              echo "::error::'## Sabit kararlar' tablosu bulunamadı; karar yazılamadı."
+              cat "$SATIRLAR"
+              exit 1
+            fi
+            { head -n "$SON" docs/ROADMAP.md; cat "$SATIRLAR"; tail -n +"$((SON + 1))" docs/ROADMAP.md; } > docs/ROADMAP.yeni
+            mv docs/ROADMAP.yeni docs/ROADMAP.md
+            echo "Sabit kararlar tablosuna eklenen satırlar:"
+            cat "$SATIRLAR"
+            DEGISTI=1
+          fi
+
+          [ "$DEGISTI" = "0" ] && { echo "Haritada değişen bir şey yok."; exit 0; }
+          git config user.name "harita-bekcisi"
+          git config user.email "harita-bekcisi@users.noreply.github.com"
+          git add docs/ROADMAP.md
+          git commit -m "harita: PR #${PR_NO} işlendi"
+          # Bu arada main ilerlemiş olabilir; tek yazar olduğumuz için
+          # rebase yeter, çakışma beklenmez.
+          git pull --rebase --quiet origin main
+          git push origin main

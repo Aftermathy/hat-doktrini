@@ -1,0 +1,261 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+name: Gemini triyaj
+
+# Ham not → tam şartname. `taslak` etiketi eklendiği anda çalışır; cron'u
+# beklemez. Sonuç onay bekler: ajan hâlâ `agent-ready` olmadan dokunmaz.
+
+# **Bu dosya merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici çağıran deponun sarmalayıcısında duruyor; burada yalnız iş var.
+# Sebebi tek kopya: bu hattı birden çok proje kullanıyor ve doktrin bir
+# projede değişip ötekilerde eskimemeli.
+#
+# Çağıran bağlam olduğu gibi korunuyor — `github.repository`, `github.event`,
+# `github.event_name`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar
+# hepsi **çağıran deponun** değerleri.
+on:
+  workflow_call:
+    inputs:
+      issue:
+        description: "Şartnameye çevrilecek issue numarası"
+        required: true
+        type: string
+
+concurrency:
+  group: gemini-triyaj-${{ inputs.issue || github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  # `gh workflow run` hem okuma hem yazma ister. Blok yazan, yazmadığı
+  # kapsamı kapatır: bu satır olmadan dispatch 403 alıyor ve `|| true`
+  # yüzünden koşu yeşil bitiyordu — zincirin halkası sessizce kopuyordu.
+  actions: write
+
+jobs:
+  refine:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'taslak'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Anahtar var mı
+        id: guard
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_FALLBACK_MODEL: ${{ vars.CLAUDE_FALLBACK_MODEL || 'claude-sonnet-5' }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "Hiçbir model anahtarı tanımlı değil." >&2
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ham notu şartnameye çevir
+        if: steps.guard.outputs.ok == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_FALLBACK_MODEL: ${{ vars.CLAUDE_FALLBACK_MODEL || 'claude-sonnet-5' }}
+          MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
+          NUM: ${{ inputs.issue || github.event.issue.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          RAW_TITLE=$(gh issue view "$NUM" --json title --jq .title)
+          RAW_BODY=$(gh issue view "$NUM" --json body --jq .body)
+
+          # Kaynak yolları projeye aittir ve .agentrc'den gelir. Dosya yoksa
+          # geniş varsayılanlara düşülür ve uyarı basılır: eksik dosyayla koşan
+          # ajan sessizce boş bağlamla çalışmamalı.
+          VARSAYILAN_YOLLAR="src"
+          VARSAYILAN_UZANTILAR="ts tsx js jsx py rs go swift kt java c cpp h sql"
+          if [ -f .agentrc ]; then
+            . ./.agentrc
+          else
+            echo "UYARI: .agentrc yok — kaynak dökümü varsayılan yollardan alınacak." >&2
+          fi
+          KAYNAK_YOLLARI="${KAYNAK_YOLLARI:-$VARSAYILAN_YOLLAR}"
+          KAYNAK_UZANTILARI="${KAYNAK_UZANTILARI:-$VARSAYILAN_UZANTILAR}"
+
+          kaynak_dosyalari() {
+            args=()
+            for u in $KAYNAK_UZANTILARI; do
+              [ "${#args[@]}" -gt 0 ] && args+=(-o)
+              args+=(-name "*.${u}")
+            done
+            # shellcheck disable=SC2086 — yollar bilerek sözcüklere ayrılıyor
+            find $KAYNAK_YOLLARI -type f \( "${args[@]}" \) 2>/dev/null | sort
+          }
+
+          KAYNAK_LISTESI=$(kaynak_dosyalari || true)
+          if [ -z "$KAYNAK_LISTESI" ]; then
+            echo "UYARI: kaynak dökümü boş — ajan kaynak kodu görmeden karar verecek. .agentrc yollarını denetle: $KAYNAK_YOLLARI" >&2
+          fi
+
+          printf '%s\n' "$RAW_TITLE" > raw_title.txt
+          printf '%s\n' "$RAW_BODY"  > raw_body.txt
+          # Sıralama başlığı da görmeli: dosya adı, tanımlayıcı ya da konu
+          # sözcüğü çoğu zaman başlıkta geçiyor ve gövde kısa olabiliyor.
+          cat raw_title.txt raw_body.txt > raw_not.txt
+
+          # ---------------------------------------------------------------
+          # Kaynak seçimi. Döküm eskiden olduğu gibi prompt'a basılıyordu;
+          # kod tabanı büyüdükçe 2026-08-17'de sağlayıcının dakikalık girdi
+          # tavanını aştı ve triyaj o günden sonra tek bir başarılı koşu
+          # üretmedi. Notun ve belgelerin tamamı gitmeye devam ediyor —
+          # kırpılan yalnızca kod dökümü.
+          #
+          # Önce modele SADECE dosya listesini gösterip hangilerinin
+          # gerektiğini soruyoruz: liste ~1.500 token, tavanın yüzde biri.
+          # Bu çağrı düşerse iş ertelenmez; sıralama sezgisel katmanlarla
+          # yapılır ve koşu devam eder. Seçim bir öneridir, kapı değil.
+          {
+            echo "Aşağıda bir yazılım projesinin bütün kaynak dosyaları ve proje"
+            echo "sahibinin ham notu var. Not bir şartnameye çevrilecek ve bunu"
+            echo "yazacak olan modelin kodu görmesi gerekiyor — ama tamamı değil."
+            echo
+            echo "Bu notu şartnameye çevirmek için hangi dosyaların İÇERİĞİ gerekli?"
+            echo "En fazla 25 dosya seç. Değiştirilecek dosyaları, onların tiplerini"
+            echo "ve yardımcılarını seç; ilgisiz olanı alma."
+            echo
+            echo "YALNIZCA dosya yollarını yaz, her satıra bir tane, başka hiçbir şey"
+            echo "yazma. Listede olmayan bir yol uydurma."
+            echo
+            echo "# Dosyalar"
+            printf '%s\n' "$KAYNAK_LISTESI"
+            echo
+            echo "# Ham not"
+            cat raw_title.txt
+            cat raw_body.txt
+          } > secim-prompt.md
+
+          if bash .github/scripts/llm.sh secim-prompt.md secim.txt 2000; then
+            echo "triyaj: kaynak seçimi modelden alındı"
+          else
+            echo "triyaj: kaynak seçimi yapılamadı — sezgisel sıralamayla devam" >&2
+            : > secim.txt
+          fi
+
+          # Bütçe bilerek CÖMERT. Güvenlik zekâdan değil paydan gelir:
+          # sıralama neyin ÖNCE geleceğini söyler, bütçe nerede KESİLECEĞİNİ.
+          # Pay büyük olunca kesim zaten ilgisiz yarıya düşer. 600 KB, kod
+          # tabanının yarısı demek ve prompt'u ~164k token'da tutar — tavanın
+          # üçte iki altında.
+          #
+          # Asıl kazanç: bu tavan kod tabanı büyüdükçe BÜYÜMÜYOR. 191 dosya
+          # da olsa 2.000 dosya da olsa prompt aynı boyutta kalır. Hattın
+          # 2026-08-17'de durmasının sebebi tam olarak bu payın olmamasıydı.
+          TRIYAJ_KAYNAK_BUTCESI=${TRIYAJ_KAYNAK_BUTCESI:-600000}
+          node .github/scripts/kaynak-sec.mjs \
+            --not raw_not.txt --oncelik secim.txt \
+            --butce "$TRIYAJ_KAYNAK_BUTCESI" \
+            --yollar "$KAYNAK_YOLLARI" --uzantilar "$KAYNAK_UZANTILARI" \
+            --haric "${KAYNAK_HARIC:-}" \
+            --her-zaman "${KAYNAK_HER_ZAMAN:-}" \
+            --sozluk "${SOZLUK_DOSYASI:-}" > secilen.txt
+
+          ATLANAN=$(printf '%s\n' "$KAYNAK_LISTESI" | grep -vxF -f secilen.txt || true)
+
+          {
+            echo "${GITHUB_REPOSITORY} projesinin vizyoner direktörü ve ürün"
+            echo "yöneticisisin. Aşağıdaki 'Kim olduğun' bölümü senin karakterin —"
+            echo "o kişi olarak düşün."
+            echo
+            echo "Proje sahibi ham bir not bıraktı. Görevin bunu, baş mühendisin"
+            echo "tereddütsüz uygulayabileceği tam bir GitHub issue şartnamesine çevirmek."
+            echo
+            echo "## Biçim"
+            echo "- İlk satır issue başlığı; markdown başlık işareti kullanma."
+            echo "- Kalan satırlar gövde: Kapsam, Teknik direktifler, Başarı kriteri,"
+            echo "  Kapsam dışı bölümleriyle."
+            echo "- Belgelerin yazıldığı dilde yaz."
+            echo
+            echo "## Karar kuralları"
+            echo "- Notun niyetini koru. Kapsamı kendiliğinden genişletme; ham notta"
+            echo "  olmayan bir özelliği ekleme."
+            echo "- Not bir hata bildirimiyse şartnameyi düzeltme olarak yaz: beklenen"
+            echo "  davranış, gözlenen davranış, nerede aranacağı."
+            echo "- Not belirsizse tahmin etme; 'Açıklığa kavuşturulmalı' başlığı altında"
+            echo "  cevaplanması gereken soruları say."
+            echo "- Kaynak kodu okudun; gerçek dosya ve fonksiyon adlarına atıf yap,"
+            echo "  var olmayan bir şeye gönderme yapma."
+            echo "- Ürünün kabul ölçütleri 'Kim olduğun' bölümünde; şartnameyi onlara"
+            echo "  karşı sına. Teknik kısıtlar 'Teknik kurallar' bölümünde."
+            echo "- Yol haritasındaki kapanmış kararları yeniden açma."
+            echo "- **Şartnamenin sonuna 'Sıralama' başlığı ekle.** Yol haritasına bakıp"
+            echo "  bu işin hangi faza ait olduğunu, şimdi mi yoksa daha sonra mı"
+            echo "  yapılması gerektiğini ve neden öyle olduğunu bir paragrafla yaz."
+            echo "  İş henüz bitmemiş bir altyapıya dayanıyorsa açıkça 'şimdi değil' de"
+            echo "  ve neyin beklendiğini söyle. Not iyi bir fikir olabilir ama sırası"
+            echo "  gelmemiş olabilir; bunu söylemek senin işin."
+            echo "- Açık issue'ları ve PR'ları tara. Bu iş onlardan biriyle aynı ekrana,"
+            echo "  modüle veya tabloya dokunacaksa şartnamenin başına şunu koy:"
+            echo "  '**Bağımlılık:** Bu iş #<numara> üzerine kurulmalı; önce o birleşmeli.'"
+            echo "  İki iş ayrı yapılınca birbirini bozacaksa bunu da açıkça belirt."
+            echo
+            echo "# Kim olduğun"
+            cat docs/PRODUCT-DNA.md
+            echo
+            echo "# Yol haritası"
+            cat docs/ROADMAP.md
+            echo
+            echo "# Baş mühendisin notları"
+            cat docs/ENGINEERING-NOTES.md
+            echo
+            echo "# Teknik kurallar"
+            cat CLAUDE.md
+            echo
+            echo "# Kaynak kod"
+            echo "Aşağıdakiler bu nota en ilgili görülen dosyalardır, ilgi sırasıyla."
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              echo "## $f"
+              echo '```'
+              cat "$f"
+              echo '```'
+              echo
+            done < secilen.txt
+            if [ -n "$ATLANAN" ]; then
+              echo "## İçeriği gönderilmeyen dosyalar (yalnızca adları)"
+              printf -- '- %s\n' $ATLANAN
+              echo "İçeriğini görmediğin dosya hakkında kesin hüküm verme."
+            fi
+            echo
+            echo "# Proje sahibinin ham notu"
+            echo "## Başlık"
+            cat raw_title.txt
+            echo "## Gövde"
+            cat raw_body.txt
+          } > prompt.md
+
+          # Metin üretimi tek kapıdan geçer: birinci sağlayıcının kotası
+          # dolduğunda ikincisi devralır, akış durmaz.
+          bash .github/scripts/llm.sh prompt.md out.md 8000
+
+      - name: Issue'yu güncelle ve onaya sun
+        if: steps.guard.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ inputs.issue || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          TITLE=$(head -1 out.md | sed 's/^#\{1,6\} *//' | cut -c1-200)
+          tail -n +2 out.md > body.md
+
+          # Ham not kaybolmasın — şartname yanlış yorumlanmışsa kaynağa dönülebilmeli.
+          {
+            printf '\n\n---\n<details>\n<summary>Özgün not</summary>\n\n'
+            cat raw_body.txt
+            printf '\n</details>\n\n_Gemini triyajından geçti; iç kontrole alındı. Mühendis ve mimar görüş bildirecek, sentez sonrası onayına gelecek._\n'
+          } >> body.md
+
+          gh label create internal-check --color 1d76db \
+            --description "Ic kontrolde: muhendis ve mimar gorus bildirecek" --force >/dev/null 2>&1 || true
+
+          gh issue edit "$NUM" --title "$TITLE" --body-file body.md \
+            --remove-label taslak --add-label internal-check
+          gh workflow run "İç kontrol" -f issue="$NUM" || true

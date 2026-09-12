@@ -1,0 +1,1025 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+name: Toplu sunum PR
+
+# Neden bu iş akışı var
+#
+# Hat günde 20-40 PR açıyor. Denetçi fiyatı PR başına olduğu için maliyet
+# koda değil **PR sayısına** bağlı: aynı satırlar 40 parçada denetlendiğinde
+# 40 kez, tek parçada denetlendiğinde bir kez ödeniyor. 22 Ağustos'ta Copilot
+# tam bu yüzden bir günde bitti (inceleme başına 13 premium istek).
+#
+# Bu iş akışı araya bir adım koyuyor: belirli bir pencerede biriken hazır
+# PR'lar tek bir **sunum dalında** birleştirilir, sahibin önüne tek PR gelir,
+# denetçi bir kez çağrılır. Tekil PR'lar silinmez — sunum birleşince
+# commit'leri `main`'e indiği için GitHub onları kendiliğinden kapatır.
+#
+# Pencere `TOPLU_ARALIK_SAAT` depo değişkeninde. Varsayılan **4 saat** =
+# günde 6 tur ve sayı ölçümle seçildi:
+#
+# - CodeRabbit Pro saatte 5 inceleme veriyor, yani günde 120 kapasite.
+#   6 tur bunun %5'i; kalanı sunum düzeltildikçe istenen tekrar incelemelere
+#   ve sohbete kalıyor.
+# - Tekil PR düzeninde tempo bu tavanın **üstündeydi**: son 25 PR'ın 2'si
+#   (#379, #387) "rate limited" ile hiç incelenmeden yeşil geçti — %8.
+#   Denetimin sessizce atlanması, sunum adımının asıl kazancı.
+# - Ortalama PR 411 satır (son 40 PR ölçüldü). 4 saatlik pencere normal
+#   tempoda 3-4 PR / ~1400 satır ediyor: tek incelemede gerçekten okunan,
+#   sahibin de tek oturuşta bakabildiği boyut. 6 saatte 5-10 PR / 2000-4000
+#   satıra çıkıyor ve inceleme derinliği orada düşüyor.
+#
+# Copilot geri gelirse sayı yeniden hesaplanır: onun fiyatı inceleme başına
+# ve Pro+ ayda 115 inceleme ediyor — günde 6 tur (ayda 180) taşar.
+#
+# Kapı yine sahibin: açık bir sunum PR'ı dururken yeni tur açılmaz. Hattın
+# hızını sahibin bakma hızı belirler, tersi değil.
+
+# **Bu dosya merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici çağıran deponun sarmalayıcısında duruyor; burada yalnız iş var.
+# Sebebi tek kopya: bu hattı birden çok proje kullanıyor ve doktrin bir
+# projede değişip ötekilerde eskimemeli.
+#
+# Çağıran bağlam olduğu gibi korunuyor — `github.repository`, `github.event`,
+# `github.event_name`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar
+# hepsi **çağıran deponun** değerleri.
+on:
+  workflow_call:
+
+permissions: {}
+
+concurrency:
+  group: toplu-pr
+  cancel-in-progress: false
+
+jobs:
+  topla:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      # Etiket oluşturmak issue kapsamına bakar; `toplu` etiketi depoda yoksa
+      # ilk turda yaratılıyor ve bu satır olmadan sessizce yaratılamıyor.
+      issues: write
+      # CI hükmü olmadan aday seçilemez ve `statusCheckRollup` bu iki kapsama
+      # bakıyor. Yokken `gh pr view` tüm sorguyu düşürüyor — yani PR "okunamadı"
+      # görünüyor, "CI'sı yok" değil. Ölçüldü: ilk turda iki aday da bu yüzden
+      # elendi (koşu 32587814411).
+      checks: read
+      # Hüküm bu iş akışının kendi eliyle yazılıyor (aşağıda), o yüzden yazma
+      # kapsamı gerekiyor; `write` okumayı da kapsadığı için `statuses` tek
+      # satır olmak zorunda. Aynı eşlemede ikinci bir `statuses` anahtarı
+      # dosyanın tamamını Actions'a geçersiz gösterir ve iş akışı hiç koşmaz.
+      statuses: write
+      # İki sebeple Actions kapsamı: `statusCheckRollup` sorgusu kontrolün ait
+      # olduğu **koşuya** kadar iniyor (`checkSuite.workflowRun`) — okuma
+      # olmadan GraphQL tüm sorguyu reddediyor. Yazma ise sunum dalının CI'sını
+      # başlatmak için: `GITHUB_TOKEN` ile itilen dal ve onunla açılan PR
+      # **hiçbir koşu doğurmuyor** (özyineleme koruması), yani hüküm elle
+      # istenmezse sunum CI'sız kalıyor. #401 tam olarak böyle açıldı.
+      #
+      # Bu iş `pull_request` olayında koşmuyor; `actions: write` yalnızca
+      # takvim ve elle tetikleme bağlamında veriliyor (bkz. pr-nanny.yml'deki
+      # aynı gerekçe).
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # `GITHUB_TOKEN` yerine PAT: otomatik token `.github/workflows/`
+          # altına hiçbir koşulda yazamaz — bu bir kapsam eksiği değil, tokenın
+          # kendisine konmuş bir sınır (`permissions:` içinde `workflows` diye
+          # bir anahtar yok ve yazılırsa dosya Actions'a geçersiz görünüp iş
+          # akışı hiç koşmuyor, #458'de ölçüldü). Sunum dalı iş akışına dokunan
+          # bir PR taşıyorsa itiş o sınıra takılıyordu; #459'un getirdiği
+          # `TOPLU_PAT` (Contents + Workflows: write) o duvarı kaldırıyor.
+          #
+          # Secret tanımlı değilse ifade boş dizeye düşer ve `checkout` kendi
+          # varsayılanına (GITHUB_TOKEN) döner: hat PAT olmadan da koşar,
+          # yalnız iş akışına dokunan PR'ları paketleyemez.
+          token: ${{ secrets.TOPLU_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Turu topla
+        env:
+          # PR'ı **PAT ile** açıyoruz, `GITHUB_TOKEN` ile değil (#745).
+          #
+          # Otomatik token'la açılan PR'ın yazarı `github-actions[bot]` oluyor
+          # ve CodeRabbit bot yazarlı PR'ları otomatik incelemeye almıyor:
+          # son yedi sunumun yedisinde de denetçinin check suite'i `queued`da
+          # kaldı, sıfır koşu. Aynı sebep CI'yı da etkiliyordu — otomatik
+          # token'la açılan PR `pull_request` olayını doğurmuyor.
+          #
+          # PAT yoksa ifade `GITHUB_TOKEN`'a düşer: hat PAT olmadan da koşar,
+          # yalnız sunumu bot kimliğiyle açar. `checkout` zaten aynı kalıbı
+          # kullanıyor (yukarıda).
+          GH_TOKEN: ${{ secrets.TOPLU_PAT || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          # Boşsa 6 sayılır. İş akışı dosyasına dokunmadan ayarlanabilsin diye
+          # depo değişkeninden okunuyor.
+          ARALIK_HAM: ${{ vars.TOPLU_ARALIK_SAAT }}
+          # Derleyici kapısının dosya adı **girdi**, gömülü değil: bu dosya
+          # `SINIF: GENEL` ve projeden projeye kopyalanıyor. `ci.yml` Vault'un
+          # adı; başka projede `build.yml` olabilir. Boşsa `ci.yml` sayılır.
+          CI_AKIS_HAM: ${{ vars.TOPLU_CI_AKISI }}
+          # Denetçinin konuşması için beklenen süre (dakika). Boşsa 12.
+          # Ölçüm: tekil PR'larda denetçi bir dakika içinde yanıt verdi
+          # (#528, #520); on iki dakika o sürenin bir düzine katı, yani
+          # "sessiz" hükmü yavaşlıktan değil gerçekten susmaktan geliyor.
+          DENETIM_BEKLEME_HAM: ${{ vars.TOPLU_DENETIM_BEKLEME_DK }}
+          # İkinci denetçinin dosya adı — `CI_AKIS_HAM` ile aynı gerekçe: bu
+          # dosya `SINIF: GENEL` ve kopyalandığı projede o denetçi hiç
+          # olmayabilir. Boşsa `denetci-nvidia.yml` sayılır; dosya yoksa
+          # dispatch düşer ve tur **durmaz** (aşağıya bakınız).
+          DENETCI_AKIS_HAM: ${{ vars.TOPLU_DENETCI_AKISI }}
+        run: |
+          set -uo pipefail
+
+          CI_AKIS="${CI_AKIS_HAM:-ci.yml}"
+          DENETCI_AKIS="${DENETCI_AKIS_HAM:-denetci-nvidia.yml}"
+
+          ARALIK="${ARALIK_HAM:-4}"
+          case "$ARALIK" in
+            ''|*[!0-9]*) echo "TOPLU_ARALIK_SAAT sayı değil ('$ARALIK') — 4 varsayıldı."; ARALIK=4 ;;
+          esac
+
+          # 1) Açık sunum varsa yeni tur yok.
+          #
+          # İkinci bir sunum açmak, aynı satırları ikinci kez denetletmek ve
+          # sahibe iki kapı göstermek demek. Bekleyen sunum bir arıza değil;
+          # kapının sahipte olduğunun görüntüsü.
+          if ! ACIK=$(gh pr list --state open --label toplu --limit 5 --json number --jq '.[].number'); then
+            echo "Sunum sorgusu düştü — bu tur hiç koşmadı, yeşil bitmesin."
+            exit 1
+          fi
+          if [ -n "$ACIK" ]; then
+            # Çıkmadan önce hükmü yeniden değerlendir (#731).
+            #
+            # `Sunum denetimi` statüsünü yalnızca bu iş akışı yazıyor ve
+            # yalnızca sunumu **açtığı** koşuda. Denetçi bulgu yazıp mühendis
+            # onu sonradan yanıtladığında hükmü yeniden okuyacak koşu yoktu:
+            # sunum kırmızı kalıyor, bu dal her turda "tur atlandı" diyor ve
+            # hat duruyor. Ölçüldü: #723 için 33 saat, 11 tur (#731).
+            #
+            # Doktrin bulguyu karşılanmış sayıyor ("mühendis gerekçeli yanıt
+            # yazdıysa bulgu karşılanmış sayılır"); eksik olan tek şey o
+            # kabulün kapıya yansıması. Ölçüt zamandır: denetçinin son
+            # yorumundan **sonra** mühendis yazmışsa yanıt verilmiş demektir.
+            #
+            # Hüküm yeşile dönmesi birleştirme emri değil — kararın sahipte
+            # olduğu değişmiyor; yalnız kapı, konuşulmuş bir hükmü sessizlikle
+            # aynı kefeye koymayı bırakıyor.
+            for PRN in $ACIK; do
+              YANIT=$(gh pr view "$PRN" --json comments --jq '
+                (.comments | map(select(.author.login == "github-actions"
+                   and (.body | test("Denetçi|Denetci")))) | last | .createdAt // "") as $d
+                | (.comments | map(select(.author.login != "github-actions")) | last | .createdAt // "") as $m
+                | if $d != "" and $m != "" and $m > $d then "evet" else "hayir" end' 2>/dev/null || echo hayir)
+              [ "$YANIT" = evet ] || continue
+              SHA=$(gh pr view "$PRN" --json headRefOid --jq .headRefOid 2>/dev/null) || continue
+              [ -n "$SHA" ] || continue
+              DURUM=$(gh api "repos/${GITHUB_REPOSITORY}/commits/$SHA/statuses" \
+                        --jq '[.[] | select(.context == "Sunum denetimi")] | first | .state // ""' 2>/dev/null || echo "")
+              [ "$DURUM" = failure ] || continue
+              if gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/$SHA" \
+                   -f state=success -f context="Sunum denetimi" \
+                   -f description="Bulgular yanıtlandı — hüküm yeniden yazıldı" >/dev/null 2>&1; then
+                echo "#$PRN: denetçi bulguları yanıtlanmış, Sunum denetimi yeniden yazıldı."
+              else
+                echo "::warning::#$PRN hükmü yeniden yazılamadı — sunum kırmızı kalıyor."
+              fi
+            done
+            echo "Açık sunum var (#$(printf '%s' "$ACIK" | tr '\n' ' ')) — tur atlandı."
+            exit 0
+          fi
+
+          # 2) Pencere dolmuş mu?
+          #
+          # **Sıralama tahmin edilmiyor, API'den isteniyor.** `gh pr list`
+          # sıralama garantisi vermiyor ve bir pencereyle sınırlı; `toplu`
+          # etiketi ise **kalıcı olarak birikiyor** (her tur bir PR, günde
+          # altı tur). Elli kayıtlık bir pencere sekiz günde doluyor ve
+          # dolduktan sonra en yeni sunum pencerenin dışında kalabilir —
+          # o hâlde "son sunum" eski bir tur sanılır ve tur **erken açılır**.
+          #
+          # Bu yüzden liste değil tek kayıt isteniyor: REST issues ucu
+          # `sort` ve `direction` parametrelerini **belgeliyor**, yani
+          # "en yenisi" burada bir varsayım değil sözleşme. Sayfalamaya da
+          # gerek kalmıyor, çünkü tek kayıt yetiyor. (PR'lar issue ucunda
+          # da dönüyor; `labels=toplu` süzgeci sunum turlarını veriyor.)
+          #
+          # **Sorgu düşerse tur koşmuyor.** Eskiden `|| echo ""` vardı ve
+          # düşen sorgu "hiç sunum yok" diye okunuyordu — yani pencere
+          # dolmuş sayılıp tur açılıyordu. Bilinmeyeni güvenli saymak,
+          # kontrolü hiç koymamakla aynı kapıya çıkar; yukarıdaki açık-sunum
+          # sorgusu da tam olarak bu sebeple `exit 1` diyor.
+          # Sorgu **PR'lara özel**: REST `/issues` ucu issue ve PR kayıtlarını
+          # birlikte döndürüyor, yani `toplu` etiketli düz bir issue açılırsa
+          # "son sunum" o sanılırdı. Eski `gh pr list --label toplu` bu ayrımı
+          # zaten yapıyordu; REST'e geçerken daraltmayı düşürmüşüm. GraphQL
+          # `pullRequests(labels:…)` hem PR'a özel hem `orderBy` ile sıralamayı
+          # belgeliyor, ve `first: 1` ile pencere diye bir şey kalmıyor.
+          #
+          # Arama (`search`) ucu kullanılmadı: o taraf indeksleme gecikmesi
+          # taşıyor ve bu iş akışının bütün hikâyesi indekse güvenmenin
+          # bedeliydi.
+          if ! SON=$(gh api graphql \
+                       -f owner="${GITHUB_REPOSITORY%/*}" \
+                       -f repo="${GITHUB_REPOSITORY#*/}" \
+                       -f query='
+                         query($owner: String!, $repo: String!) {
+                           repository(owner: $owner, name: $repo) {
+                             pullRequests(labels: ["toplu"], first: 1,
+                                          orderBy: {field: CREATED_AT, direction: DESC}) {
+                               nodes { createdAt }
+                             }
+                           }
+                         }' \
+                       --jq '.data.repository.pullRequests.nodes[0].createdAt // ""'); then
+            echo "Son sunum sorgusu düştü — bu tur hiç koşmadı, yeşil bitmesin."
+            exit 1
+          fi
+          if [ -n "$SON" ]; then
+            GECEN=$(( ( $(date -u +%s) - $(date -u -d "$SON" +%s) ) / 3600 ))
+            if [ "$GECEN" -lt "$ARALIK" ]; then
+              echo "Son sunumun üzerinden $GECEN saat geçti, pencere $ARALIK saat — tur atlandı."
+              exit 0
+            fi
+          fi
+
+          # 3) Adaylar: hazır, çakışmasız, CI'sı yeşil, kendi deposundan.
+          #
+          # Taslak PR alınmaz (mühendis üzerinde çalışıyor), `sunuma-girmez`
+          # etiketlisi alınmaz (sahip bir konuyu turdan çıkarabilmeli — sunumu
+          # reddetmenin bedeli tüm turu kaybetmek olmasın), çatal alınmaz.
+          if ! LISTE=$(gh pr list --state open --draft=false --base main --limit 200 \
+                        --json number,labels,isCrossRepository \
+                        --jq '.[] | select((.labels | map(.name) | index("toplu") | not) and (.labels | map(.name) | index("sunuma-girmez") | not)) | select(.isCrossRepository | not) | .number'); then
+            echo "PR listesi alınamadı — bu tur hiç koşmadı, yeşil bitmesin."
+            exit 1
+          fi
+          [ -z "$LISTE" ] && { echo "Toplanacak PR yok."; exit 0; }
+
+          git config user.name "toplu-pr"
+          git config user.email "toplu-pr@users.noreply.github.com"
+          git fetch origin main --quiet
+          DAL="toplu/$(date -u +%Y%m%d-%H%M)"
+          git checkout -qB "$DAL" origin/main
+
+          ALINAN=""
+          ATLANAN=""
+          GOVDE_ISLER=""
+          # Sunum gövdesine aynen taşınacak `harita: sabit-karar` satırları ve
+          # taraması düşen konular. İkincisi ayrı tutuluyor: bir kararın
+          # okunamadığını söylemeyen gövde, kararı hiç olmayan gövdeden
+          # ayırt edilemez.
+          KARARLAR=$(mktemp)
+          KARAR_OKUNMADI=""
+          for NUM in $LISTE; do
+            # Hata bastırılmıyor, yazdırılıyor: "okunamadı" tek başına
+            # teşhis edilemez bir cümle. İlk turda iki aday da böyle elendi ve
+            # sebebi ancak hata metni görülünce anlaşıldı.
+            if ! VERI=$(gh pr view "$NUM" --json headRefName,title,body,mergeable,statusCheckRollup 2>/tmp/pr-hata); then
+              echo "── #$NUM okunamadı: $(tr '\n' ' ' < /tmp/pr-hata | cut -c1-300)"
+              ATLANAN="$ATLANAN- #$NUM — PR okunamadı"$'\n'; continue
+            fi
+
+            HEAD=$(printf '%s' "$VERI" | jq -r .headRefName)
+            BASLIK=$(printf '%s' "$VERI" | jq -r .title)
+            MERGE=$(printf '%s' "$VERI" | jq -r .mergeable)
+
+            # CI hükmü: tek bir başarısız kontrol turu durdurur. "Hiç kontrol
+            # yok" da yeşil sayılmaz — bayat yeşil ile boş yeşil aynı şeydir.
+            #
+            # **Hüküm iki ayrı alandan okunuyor ve bu şart.** `statusCheckRollup`
+            # tek tür değil, iki tür düğüm döndürüyor:
+            #
+            #   CheckRun       — Actions job'ları (`build`, `workflow-lint`)
+            #                    hükmü `.conclusion`, ayrıca `.status` taşıyor
+            #   StatusContext  — commit statüleri (`Denetci (NVIDIA)`,
+            #                    `CodeRabbit`, `Sunum denetimi`)
+            #                    hükmü `.state`, `.conclusion` alanı **yok**
+            #
+            # Yalnız `.conclusion`'a bakan sayım, commit statüsü yazan her
+            # denetçiyi görmez: `Denetci (NVIDIA)` engel hükmü verirken
+            # `BASARISIZ` sıfır okur ve PR sunuma alınır. Kapı, kapatması
+            # gereken tam da bu duruma kördü.
+            #
+            # `// ""` ikisinden hangisi varsa onu alıyor; ikisi de yoksa boş
+            # dize kalıyor ve hiçbir eşleşmeye takılmıyor. `ascii_upcase`
+            # gerekiyor çünkü iki tür farklı kasa kullanıyor: CheckRun
+            # `FAILURE`, StatusContext `failure`.
+            HUKUM='[.statusCheckRollup[]? | ((.conclusion // .state) // "") | ascii_upcase]'
+            BASARISIZ=$(printf '%s' "$VERI" | jq "$HUKUM"' | map(select(. == "FAILURE" or . == "TIMED_OUT" or . == "CANCELLED" or . == "ERROR")) | length')
+            BEKLEYEN=$(printf '%s' "$VERI" | jq "$HUKUM"' | map(select(. == "IN_PROGRESS" or . == "QUEUED" or . == "PENDING" or . == "EXPECTED" or . == "WAITING")) | length')
+            GECEN_K=$(printf '%s' "$VERI" | jq "$HUKUM"' | map(select(. == "SUCCESS")) | length')
+
+            if [ "$BASARISIZ" != "0" ]; then
+              echo "── #$NUM CI kırmızı, atlandı"; ATLANAN="$ATLANAN- #$NUM — CI kırmızı"$'\n'; continue
+            fi
+            if [ "$BEKLEYEN" != "0" ] || [ "$GECEN_K" = "0" ]; then
+              echo "── #$NUM CI beklemede ya da hiç koşmamış, atlandı"
+              ATLANAN="$ATLANAN- #$NUM — CI hükmü yok, bir sonraki tura kaldı"$'\n'; continue
+            fi
+            if [ "$MERGE" = "CONFLICTING" ]; then
+              echo "── #$NUM çakışıyor, atlandı"; ATLANAN="$ATLANAN- #$NUM — \`main\` ile çakışıyor"$'\n'; continue
+            fi
+
+            git fetch origin "$HEAD" --quiet 2>/dev/null || {
+              echo "── #$NUM dalı alınamadı"; ATLANAN="$ATLANAN- #$NUM — dal alınamadı"$'\n'; continue; }
+
+            # `GITHUB_TOKEN` `.github/workflows/` altına **hiçbir koşulda**
+            # yazamaz; bu bir kapsam eksiği değil, tokenın kendisine konmuş
+            # bir sınır ve `permissions:` bloğundan açılamıyor (`workflows`
+            # diye bir kapsam yok — yazılırsa dosya Actions'a geçersiz görünür
+            # ve iş akışı hiç koşmaz). Sunum dalı adayların diff'ini olduğu
+            # gibi taşıdığı için böyle bir aday **turun tamamını** düşürüyordu:
+            # dokuz PR'ın dokuzu birleştirildikten sonra push reddediliyor,
+            # tur elleri boş dönüyordu (24-25 Ağustos, 30 koşu).
+            #
+            # Aday burada eleniyor, turdan sonra değil: bir konunun bedelini
+            # kalan sekizine ödetmemek için. Böyle bir PR sahibe doğrudan
+            # gider — sunumdan geçirilemez, çünkü geçirilecek yol yok.
+            #
+            # Yollar `gh pr view --json files`ten değil **git'ten** okunuyor ve
+            # iki sebep de ölçülmüş: o alan yüzüncü dosyada **sessizce** kesiliyor
+            # (cli/cli#9916) ve yeniden adlandırmada yalnızca yeni yolu veriyor.
+            # `--no-renames` eski yolu da görünür kılıyor — bir iş akışını dizinin
+            # **dışına** taşımak da yasak olan yazma, ve yalnızca yeni yola bakan
+            # bir kapı onu hiç göremez.
+            #
+            # Okuma düşerse aday alınmıyor. "Dokunmuyor" varsayımı turun tamamını
+            # riske atar; bir konuyu bir tur geciktirmek atmaz.
+            if ! DOKUNULAN=$(git diff --name-only --no-renames \
+                               "$(git merge-base origin/main "origin/$HEAD")" "origin/$HEAD" 2>/dev/null); then
+              echo "── #$NUM değişen dosyaları okunamadı, atlandı"
+              ATLANAN="$ATLANAN- #$NUM — değişen dosyalar okunamadı"$'\n'; continue
+            fi
+            # Boru **yok** ve sebebi ölçüldü: `grep -q` ilk eşleşmede çıkıp
+            # boruyu kapatıyor, yazan taraf SIGPIPE ile 141 dönüyor ve
+            # `pipefail` o 141'i hattın hükmü yapıyor — yani eşleşme
+            # *bulunduğunda* koşul yanlışa düşüyor. Küçük listede görünmüyor
+            # (yazan taraf tampona sığıp bitiyor); 580 KB'lık bir listede
+            # ölçüldü ve aday **eleneceği yerde alınıyordu**. Tam da kalabalık
+            # PR'da, yani kapının en çok gerektiği yerde.
+            # Eleme kaldırıldı (#459): checkout artık `TOPLU_PAT` ile
+            # kimliklendiği için sunum dalı `.github/workflows/` altındaki
+            # değişiklikleri de taşıyabiliyor. PAT tanımlı değilse yukarıdaki
+            # ifade GITHUB_TOKEN'a düşer ve bu sınıf PR'da itiş başarısız olur —
+            # sessizce değil: adım kırmızıya döner ve sebep log'da görünür.
+            # Sessiz eleme yerine görünür arıza, çünkü elenen PR kimseye
+            # söylenmeden turdan düşüyordu.
+
+            # `--no-ff` şart: sunum birleşince tekil PR'ların **kendi
+            # commit'leri** main'den erişilebilir olmalı ki GitHub onları
+            # "birleşti" saysın ve `Closes #N` atıfları işlesin. Squash bu
+            # zinciri koparır — sunum PR'ı da squash ile birleştirilmemeli.
+            if git merge --no-ff "origin/$HEAD" -m "#$NUM birleştirildi: $BASLIK" --quiet; then
+              echo "── #$NUM alındı"
+              ALINAN="$ALINAN $NUM"
+              # Konunun kapattığı issue'lar sunum gövdesine de yazılıyor:
+              # otomatik kapanmaya ek bir güvence, ve sahip için okunur liste.
+              ATIF=$(printf '%s' "$VERI" | jq -r '.body // ""' | grep -oiE '(closes|fixes|resolves) #[0-9]+' | tr '\n' ' ' || true)
+              GOVDE_ISLER="$GOVDE_ISLER- #$NUM — $BASLIK${ATIF:+ (${ATIF% })}"$'\n'
+
+              # `harita: sabit-karar` işaretleri de sunum gövdesine taşınıyor.
+              # Bekçi sunum birleşince **sunum gövdesini** okuyor; işaret orada
+              # yoksa karar haritaya hiç ulaşmıyor. Ölçüldü (#495): #493'ün
+              # gövdesinde üç `Closes` atfı vardı, sabit-karar işareti sıfır —
+              # çünkü bu adım yalnızca atıfları topluyordu.
+              #
+              # Normalleştirme bekçininkiyle **birebir aynı** olmak zorunda
+              # (roadmap-keeper.yml, adım 2): tam `code` sarmalaması kaldırılır,
+              # kenar boşlukları kırpılır, sonra önek aranır. Farklı bir okuma,
+              # iki tarafın farklı satır görmesi demek — ve fark sessiz olur.
+              KARAR_HAM=$(mktemp)
+              KARAR_DUZ=$(mktemp)
+              KARAR_BULUNAN=$(mktemp)
+              OKUNDU=1
+              if printf '%s' "$VERI" | jq -r '.body // ""' > "$KARAR_HAM" \
+                 && tr -d '\r' < "$KARAR_HAM" \
+                      | sed -E 's/^[[:space:]]*`(.*)`[[:space:]]*$/\1/; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+                      > "$KARAR_DUZ"; then
+                # 0 = işaret var, 1 = hiç yok — ikisi de normal. Yalnızca 1'den
+                # büyük bir hüküm taramanın kendisinin düştüğünü söyler.
+                #
+                # Hüküm `$?` ile değil `|| KARAR_RC=$?` ile alınıyor, ve fark
+                # turun tamamı: adım `bash -e` ile koşuyor, yani eşleşme
+                # bulamayan `grep` kabuğu **o satırda** öldürüyor ve altındaki
+                # okuma hiç çalışmıyor. Niyet ("1 normaldir") yorumda yazılıydı,
+                # koda geçmemişti. Bedeli ölçüldü: #512 birleştikten sonra
+                # (26 Ağustos 17:51) pencereyi açık bulan dört tur da ilk
+                # adayın "── #N alındı" satırından hemen sonra, tek satır hata
+                # metni bırakmadan çıkış 1 ile bitti; 30 saat boyunca hiçbir
+                # sunum açılmadı ve üç hazır PR kapıya çıkamadı (#526).
+                #
+                # Turu düşüren aday özel bir aday değil: işareti **olmayan**
+                # her PR, yani adayların çoğunluğu.
+                KARAR_RC=0
+                grep -E '^harita: sabit-karar[[:space:]]*\|' "$KARAR_DUZ" \
+                     > "$KARAR_BULUNAN" || KARAR_RC=$?
+                if [ "$KARAR_RC" -gt 1 ]; then OKUNDU=0; fi
+              else
+                OKUNDU=0
+              fi
+
+              if [ "$OKUNDU" = 0 ]; then
+                echo "── #$NUM sabit-karar taraması düştü"
+                KARAR_OKUNMADI="$KARAR_OKUNMADI- #$NUM — \`harita: sabit-karar\` işaretleri **okunamadı**; kararı elle taşımak gerekiyor"$'\n'
+              else
+                # Aynı işaret iki PR'da duruyorsa gövdeye bir kez yazılıyor.
+                # `grep` bir **dosyadan** okuyor, borudan değil: bu dosyadaki
+                # SIGPIPE tuzağı (yukarıda, `.github/workflows/` kapısı) yalnızca
+                # boruya yazan tarafı vuruyor.
+                while IFS= read -r ISARET; do
+                  [ -z "$ISARET" ] && continue
+                  grep -Fqx "\`$ISARET\`" "$KARARLAR" || printf '`%s`\n' "$ISARET" >> "$KARARLAR"
+                done < "$KARAR_BULUNAN"
+              fi
+              rm -f "$KARAR_HAM" "$KARAR_DUZ" "$KARAR_BULUNAN"
+            else
+              git merge --abort 2>/dev/null || true
+              echo "── #$NUM sunum dalıyla çakıştı, atlandı"
+              ATLANAN="$ATLANAN- #$NUM — sunum dalındaki başka bir konuyla çakıştı"$'\n'
+            fi
+          done
+
+          if [ -z "$ALINAN" ]; then
+            echo "Hiçbir PR alınamadı, sunum açılmadı."
+            printf '%s' "$ATLANAN"
+            exit 0
+          fi
+
+          SAYI=$(printf '%s' "$ALINAN" | wc -w | tr -d ' ')
+          git push -q origin "$DAL" || { echo "Sunum dalı itilemedi."; exit 1; }
+
+          # Gövde heredoc ile kurulmuyor: bir heredoc'un sonlandırıcısı
+          # sütun sıfırda durmak zorunda, YAML blok skaları ise sütun sıfırda
+          # biter. İkisi aynı dosyada yan yana gelince biri ötekini kesiyor.
+          EKLE() { GOVDE="$GOVDE$1"$'\n'; }
+          GOVDE=""
+          EKLE "Bu PR, son $ARALIK saatte hazır hâle gelen **$SAYI konuyu** tek kapıya"
+          EKLE "topluyor. Amacı denetim ekonomisi: aynı satırlar $SAYI ayrı PR'da $SAYI kez"
+          EKLE "değil, burada bir kez denetleniyor."
+          EKLE ""
+          EKLE "## İçindeki konular"
+          EKLE ""
+          EKLE "$GOVDE_ISLER"
+          # Kararlar kendi başlığı altında ve **tek başına** duran satırlar
+          # olarak yazılıyor: bekçinin okuması `^harita: sabit-karar` önekini
+          # arıyor, yani bir liste iminin ("- ") ardına konan işaret hiç
+          # görünmezdi.
+          EKLE "## Haritaya işlenecek sabit kararlar"
+          EKLE ""
+          if [ -s "$KARARLAR" ]; then
+            EKLE "Tekil PR gövdelerinden aynen taşındı. Harita bekçisi bu sunum"
+            EKLE "birleştiğinde bu satırları okuyup \"Sabit kararlar\" tablosuna yazar."
+            EKLE ""
+            while IFS= read -r SATIR; do EKLE "$SATIR"; done < "$KARARLAR"
+            EKLE ""
+          else
+            # Yokluk da yazılıyor: "bu turda karar yok" ile "tarayıcı sessizce
+            # hiçbir şey üretmedi" gövdeye bakan için aynı görünmemeli.
+            EKLE "Bu turdaki konuların hiçbiri sabit karar taşımıyor."
+            EKLE ""
+          fi
+          if [ -n "$KARAR_OKUNMADI" ]; then
+            EKLE "**Taraması düşen konular — kararları elle taşınmalı:**"
+            EKLE ""
+            EKLE "$KARAR_OKUNMADI"
+          fi
+          EKLE "## Bu tura girmeyenler"
+          EKLE ""
+          EKLE "${ATLANAN:-- yok}"
+          EKLE "## Birleştirme kuralı"
+          EKLE ""
+          EKLE "**Merge commit ile birleştirilmeli, squash ile değil.** Tekil PR'ların kendi"
+          EKLE "commit'leri \`main\`'den erişilebilir kalmazsa GitHub onları \"birleşti\""
+          EKLE "saymaz ve \`Closes #N\` atıfları işlemez."
+          EKLE ""
+          EKLE "Bir konuyu bu turdan çıkarmak için o PR'a \`sunuma-girmez\` etiketi koyup bu"
+          EKLE "sunumu kapatmak yeterli: bir sonraki tur kalanlarla yeniden kurulur."
+
+          # PR açılamazsa dal geride bırakılmıyor: her tur yeni bir dal adı
+          # üretiyor, yani artıklar sessizce birikir ve hiçbiri kendini
+          # göstermez. (Depo ayarı: "Allow GitHub Actions to create and approve
+          # pull requests" açık olmalı — kapalıyken `gh pr create` GraphQL'de
+          # reddediliyor ve sebebi ancak hata metninde görülüyor.)
+          if ! PR_URL=$(gh pr create --base main --head "$DAL" \
+                          --title "Toplu sunum — $SAYI konu ($(date -u '+%d %b %H:%M') UTC)" \
+                          --body "$GOVDE"); then
+            echo "Sunum PR'ı açılamadı — dal siliniyor."
+            git push -q origin --delete "$DAL" || echo "UYARI: artık dal silinemedi: $DAL"
+            exit 1
+          fi
+          echo "Sunum açıldı: $PR_URL"
+
+          # CI hükmü elle isteniyor ve sessizce yutulmuyor: hükümsüz bir sunum,
+          # kırmızı bir sunumdan kötüdür — biri "bakma" der, öteki hiçbir şey
+          # demez. Koşu dala dispatch ediliyor; check run'lar dalın ucundaki
+          # SHA'ya bağlandığı için PR kapısında görünüyorlar.
+          # CI tetikleniyor **ve hükmü burada bekleniyor.**
+          #
+          # Neden burada: `workflow_dispatch` ile doğan koşunun check suite'i
+          # hiçbir PR'a bağlı değil, yani hüküm PR kapısında görünmüyor. Bunu
+          # bir `workflow_run` iş akışının aynaya alması denendi (`sunum-hukmu.yml`)
+          # ve **güvenilmez** çıktı: bir sunumda yazdı, bir sonrakinde olay hiç
+          # doğmadı (ölçüm: #409 yeşil, #417 hükümsüz). Kapıda görünmeyen hüküm
+          # hüküm değil; o yüzden zincirin halkası kısaltıldı — koşuyu başlatan
+          # taraf sonucunu da kendisi yazıyor.
+          #
+          # Bedeli bu işin birkaç dakika beklemesi. Karşılığı, sahibin
+          # birleştirmeden önce gerçekten bir derleyici hükmü görmesi.
+          # Dispatch'ten **önceki** en büyük dispatch koşusu kimliği. Koşu
+          # kimlikleri artan olduğu için bu bir sınır: aşağıda yalnızca bundan
+          # büyük bir kimlik kabul ediliyor. Aynı dal ve aynı SHA üzerinde
+          # ikinci kez koşulursa eski koşu zaten indekste durur ve yenisi henüz
+          # görünmeden seçilebilirdi; bayat bir hükmü yeni SHA'ya yazmak sessiz
+          # bir hata olurdu.
+          #
+          # `max`, `.[0]` değil: `gh run list` sıralamasını garanti etmiyor
+          # (`--branch` filtresi sorguyu başka bir indekse çevirebiliyor,
+          # cli/cli#6678). Listenin ilkini "en yeni" saymak, sınırı sessizce
+          # olması gerekenden küçük bırakabilirdi — yani korumanın kendisi
+          # sıralama varsayımına dayanırdı.
+          #
+          # Sorgu düşerse sınır **0 sayılmıyor**: `|| echo 0` yazmak, okunamayan
+          # bir değeri "koruma gerekmiyor" diye yorumlamak olurdu ve korumayı
+          # tam da en kırılgan anda kapatırdı. Bu deponun kendi kuralı:
+          # bilinmeyeni güvenli saymak, kontrolü hiç koymamakla aynı kapıya
+          # çıkar. Üç deneme, sonra sınır boş kalır ve aşağıda hiç aday
+          # seçilmez — hüküm "okunamadı", yani kırmızı yazılır.
+          ONCEKI=""
+          for _ in 1 2 3; do
+            AD=$(gh run list --workflow "$CI_AKIS" --branch "$DAL" --event workflow_dispatch \
+                   --limit 50 --json databaseId --jq '[.[].databaseId] | max // 0' 2>/dev/null)
+            case "$AD" in
+              ''|*[!0-9]*) sleep 3 ;;
+              *) ONCEKI="$AD"; break ;;
+            esac
+          done
+
+          # Koşu aranmadan önce **işaretleniyor**.
+          #
+          # Yukarıdaki üç ölçüt (olay, SHA, kimlik sınırı) aramayı daralttı ama
+          # arama olmaktan çıkarmadı; üçü de "benim koşum" sorusuna yaklaşık
+          # cevap veriyor ve üçü de ayrı turlarda ayrı bir yerinden yanlış
+          # çıktı (#412, üç tur). Kimliği dispatch girdisiyle taşımak soruyu
+          # tümden kaldırıyor: koşu adında kendi kimliğini gösteriyor.
+          #
+          # Kimlik **koşudan** türüyor, daldan değil.
+          #
+          # Önce dal adını kullanmıştım ("her tur yeniden yaratılıyor") ama dal
+          # adı dakika hassasiyetinde: `toplu/<YYYYmmdd-HHMM>`. Aynı dakika
+          # içinde yeniden çalıştırılan bir tur aynı dal adını **ve** aynı
+          # SHA'yı üretir, yani aynı kimliği — o hâlde yeni koşu indekslenmeden
+          # eskisi seçilebilir. Tam da kaldırmaya çalıştığım belirsizlik.
+          #
+          # `GITHUB_RUN_ID` koşu başına benzersiz, `GITHUB_RUN_ATTEMPT` yeniden
+          # denemeleri ayırıyor; ikisi birlikte çakışmayı tanım gereği
+          # bitiriyor. SHA okunabilirlik için duruyor.
+          KIMLIK="sunum-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(git rev-parse --short HEAD)"
+          KIMLIKLI=0
+          DISPATCH=0
+          DISPATCH_HATA=""
+
+          # **Girdiyi tanımayan bir CI akışı bu iş akışını kırmamalı.** Bu dosya
+          # `SINIF: GENEL`; kopyalandığı projenin `ci.yml`'inde `correlation_id`
+          # girdisi olmayabilir ve o hâlde `gh workflow run -f ...` dispatch'i
+          # tümden reddeder — yani kimlik uğruna turun CI'sı hiç koşmaz.
+          # Önce kimlikli denenip düşerse kimliksize inmek, kazancı olan yerde
+          # alıp olmayan yerde eski davranışa dönmeyi sağlıyor.
+          #
+          # **Ama yalnızca girdi tanınmadığında.** Her non-zero sonucu ikinci
+          # dispatch'e çevirmek, yetki/kota/ağ arızasında da yeniden denemek
+          # demek — ve ilk istek kabul edilip yanıtı kaybolduysa **iki CI
+          # koşusu** doğar. "Hata neydi bilmiyorum, o hâlde öteki yolu
+          # deneyeyim" bu dosyanın tekrar tekrar ödediği hatanın kendisi:
+          # bilinmeyeni bilinen bir duruma saymak. Yedek yol artık hatanın
+          # ne olduğuna bakıyor; başka her arıza durduruyor ve sebebi yazıyor.
+          if HATA=$(gh workflow run "$CI_AKIS" --ref "$DAL" -f correlation_id="$KIMLIK" 2>&1); then
+            KIMLIKLI=1; DISPATCH=1
+            echo "CI dispatch edildi (kimlik: $KIMLIK), hüküm bekleniyor"
+          elif printf '%s' "$HATA" | grep -qi 'unexpected input'; then
+            if gh workflow run "$CI_AKIS" --ref "$DAL"; then
+              DISPATCH=1
+              echo "::warning::$CI_AKIS correlation_id girdisini tanımıyor — seçim olay+SHA+sınır ile yapılacak."
+              echo "CI dispatch edildi (kimliksiz), hüküm bekleniyor"
+            else
+              echo "::warning::Sunum dalı için kimliksiz CI dispatch de edilemedi ($DAL)."
+              DISPATCH_HATA="CI dispatch edilemedi"
+            fi
+          else
+            echo "::warning::Sunum dalı için CI dispatch edilemedi ($DAL): $HATA"
+            DISPATCH_HATA="CI dispatch edilemedi"
+          fi
+
+          # Sınır yalnızca **kimliksiz** yolda gerekiyor: kimlik varken seçim
+          # zaten tek koşuya iniyor ve "dispatch'ten sonra doğmuş olmak"
+          # ölçütüne ihtiyaç kalmıyor.
+          if [ "$DISPATCH" = 1 ] && [ "$KIMLIKLI" = 0 ] && [ -z "$ONCEKI" ]; then
+            echo "::warning::Dispatch öncesi koşu sınırı okunamadı — hüküm yazılmayacak."
+          fi
+
+          # İkinci denetçi de dispatch ile çağrılıyor, ve sebebi CI'nınkiyle
+          # **aynı**: bu PR'ı `github-actions[bot]` açıyor, `GITHUB_TOKEN` ile
+          # açılan bir PR `pull_request` olayı doğurmuyor. `denetci-nvidia.yml`
+          # `opened` bekliyor, olay hiç gelmiyor ve iş akışı `action_required`
+          # diye askıda kalıp koşmuyordu — yani sunum PR'ında iki denetçiden
+          # **hiçbiri** çalışmıyordu. Kapı da yalnızca CodeRabbit'e baktığı için
+          # bunu "denetçi sessiz" diye yazıyordu; sessiz olan denetçi değil,
+          # hiç çağrılmamış bir iş akışıydı.
+          #
+          # `--ref "$DAL"` CI ile aynı: dispatch, iş akışı dosyasını o daldan
+          # okur ve sunum dalı `main` + birleşen konulardan kuruluyor.
+          # Denetçi PR numarasını girdi olarak alıyor ve SHA'yı ondan çözüyor
+          # (`gh pr view --json headRefOid`), yani hükmü doğru commit'e yazmak
+          # için `--ref`'e bağımlı değil — dal yalnızca hangi dosyanın koşacağını
+          # söylüyor.
+          #
+          # **Düşen dispatch turu durdurmuyor.** Denetçi CI değil: kapının
+          # hükmü aşağıda iki denetçinin *statüsünden* okunuyor ve çağrılamamış
+          # bir denetçi orada zaten "sessiz" olarak görünür. Burada `exit 1`
+          # etmek, sunum PR'ını etiketsiz bırakıp bir sonraki tura ikinci bir
+          # sunum açtırırdı — `Sunum CI` bloğunun aynı gerekçesi.
+          # Sonuç **taşınıyor**: kapı aşağıda "sessiz kaldı" ile "hiç
+          # çağrılmadı" arasındaki farkı ancak bu bayrakla yazabiliyor. Koşu
+          # günlüğündeki bir uyarı bu ayrımı kapıya taşımıyor ve kapıya
+          # taşınmayan bir arıza, sahibin göremediği bir arıza.
+          DENETCI_DISPATCH=0
+          if gh workflow run "$DENETCI_AKIS" --ref "$DAL" -f pr="${PR_URL##*/}" 2>/dev/null; then
+            DENETCI_DISPATCH=1
+            echo "İkinci denetçi dispatch edildi ($DENETCI_AKIS, PR ${PR_URL##*/})"
+          else
+            echo "::warning::İkinci denetçi dispatch edilemedi ($DENETCI_AKIS) — kapı yalnızca öteki denetçiye bakacak."
+          fi
+
+          # **Hüküm her hâlükârda yazılıyor, dispatch düşse bile.**
+          #
+          # Eskiden dispatch edilemediğinde yalnızca uyarı düşülüyordu ve statü
+          # bloğu tümden atlanıyordu: sunum PR'ı kapıya **hiç `Sunum CI`
+          # olmadan** çıkıyordu. Kırmızı değil, **yok** — ve yokluk kapıda
+          # kırmızı gibi görünmez, birleştirilebilir gibi görünür. Bu iş
+          # akışının bütün amacı sahibin kapıda bir derleyici hükmü görmesiydi.
+          #
+          # Alternatif `exit 1` olurdu ama **daha kötü**: etiketleme bu bloğun
+          # aşağısında (`gh pr edit --add-label toplu`) ve iş orada bitince
+          # sunum PR'ı etiketsiz kalır; bir sonraki tur onu göremez ve **ikinci
+          # bir sunum** açar. Dosya bu sonucu etiket satırında zaten yazıyor.
+          # Yani doğru cevap turu kesmek değil, sebebi kapıya yazmak.
+          SHA=$(git rev-parse HEAD)
+          if [ "$DISPATCH" = 1 ] && { [ "$KIMLIKLI" = 1 ] || [ -n "$ONCEKI" ]; }; then
+            KOSU=""
+            SORGU_DUSTU=0
+            # Tavan 10 dakika ve **tek** son tarih: koşuyu bulmak ile hükmünü
+            # beklemek aynı bütçeden yiyor. İki ayrı sayaç toplam beklemeyi
+            # tavanın üstüne çıkarır, ve keşfe ayrılan pay dolduğunda o pay
+            # bittiği için henüz görünmemiş bir koşu "hiç yok" sayılırdı. CI bu
+            # depoda iki dakikada bitiyor; tavan takılmayı kesmek için var,
+            # beklemeyi uzatmak için değil.
+            SON=$(( $(date -u +%s) + 600 ))
+            # Dispatch'in Actions API'sinde indekslenmesi anlık değil.
+            #
+            # Koşu **olayına ve SHA'sına göre** seçiliyor, "en yeni" diye değil.
+            # Bot'un açtığı PR için GitHub aynı SHA'ya ikinci bir koşu
+            # (`pull_request`) daha yaratıyor ve onu onay bekler durumda
+            # parkediyor. O koşu doğduğu anda `completed`/`action_required`
+            # olduğundan, "en yeni"yi alan bir seçim bizim koşumuz daha
+            # başlamadan hükmü ondan okur ve yeşil CI'yı kırmızı gösterir.
+            # Ölçüldü (#432): dispatch koşusu 13:49:15'te yeşil bitti, hüküm
+            # 13:48:31'de parkedilmiş koşudan kırmızı yazıldı.
+            #
+            # SHA eşitliği ikinci koruma: başka bir SHA'nın hükmünü bu SHA'ya
+            # yazmak sessiz ve en pahalı hata olurdu. `ONCEKI` üçüncüsü ve
+            # sıralamaya güvenmeyi bitiriyor — aday, dispatch'ten sonra doğmuş
+            # olmak zorunda.
+            #
+            # Aday **en büyük** eşleşen kimlik, listenin ilki değil: sıralama
+            # garanti olmadığı için "ilk eşleşen" bir seçim ölçütü değil.
+            # Pencere 50; düşseydi de sonuç sessiz olmazdı — seçim boş döner,
+            # döngü tükenir, hüküm "okunamadı" yani kırmızı yazılır.
+            #
+            # Aynı SHA'ya başka bir dispatcher (`pr-nanny.yml`) da koşu
+            # başlatabiliyor. SHA eşitliği bunu zararsız kılıyor: seçilen koşu
+            # bizimki olmasa bile **aynı commit'in** hükmünü taşır, ki statünün
+            # anlattığı şey de o commit. Koşunun kime ait olduğunu kanıtlamak
+            # ayrı bir iş (bkz. nottaki correlation ID önerisi).
+            #
+            # Sorgunun **düşmesi** ile boş yanıt ayrı taşınıyor (`SORGU_DUSTU`).
+            # İkisini tek boş değere indirmek, "sormaya çalıştım, olmadı"yı
+            # "böyle bir koşu yok" diye yazdırır — bu iş akışının düzeltmeye
+            # çalıştığı kusurun tam olarak aynısı, bir kat aşağıda. API arızası
+            # bütçe boyunca sürerse var olan bir koşu "bulunamadı" diye
+            # raporlanırdı.
+            #
+            # Sınır okunamadıysa aday hiç aranmıyor: sınırsız bir "yeni olma"
+            # ölçütü, ölçüt değildir.
+            #
+            # **Kimlik varsa seçim yukarıdaki üç ölçütün hiçbirine bakmıyor:**
+            # koşu adı `CI · <kimlik>` ve kimlik bu tura özel. SHA eşitliği
+            # yine de isteniyor — kimliği taşıyan koşunun başka bir commit'i
+            # derlemesi beklenen bir durum değil, ve beklenmeyeni sessizce
+            # kabul etmek bu iş akışının tekrar tekrar düştüğü kuyu.
+            while [ "$(date -u +%s)" -lt "$SON" ]; do
+              sleep 5
+              if HAM=$(gh run list --workflow "$CI_AKIS" --branch "$DAL" --event workflow_dispatch \
+                         --limit 50 --json databaseId,headSha,displayTitle 2>/dev/null); then
+                if [ "$KIMLIKLI" = 1 ]; then
+                  KOSU=$(printf '%s' "$HAM" | jq -r --arg sha "$SHA" --arg ad "CI · $KIMLIK" \
+                           '[.[] | select(.displayTitle == $ad and .headSha == $sha) | .databaseId]
+                            | max // ""' 2>/dev/null) && SORGU_DUSTU=0 || { SORGU_DUSTU=1; KOSU=""; }
+                else
+                  KOSU=$(printf '%s' "$HAM" | jq -r --arg sha "$SHA" --argjson onceki "${ONCEKI:-0}" \
+                           '[.[] | select(.headSha == $sha and .databaseId > $onceki) | .databaseId]
+                            | max // ""' 2>/dev/null) && SORGU_DUSTU=0 || { SORGU_DUSTU=1; KOSU=""; }
+                fi
+              else
+                SORGU_DUSTU=1
+              fi
+              [ -n "$KOSU" ] && break
+            done
+
+            HUKUM=""
+            if [ -n "$KOSU" ]; then
+              while [ "$(date -u +%s)" -lt "$SON" ]; do
+                if DURUM=$(gh run view "$KOSU" --json status,conclusion --jq '"\(.status) \(.conclusion // "")"' 2>/dev/null); then
+                  SORGU_DUSTU=0
+                  case "$DURUM" in
+                    completed*) HUKUM="${DURUM#completed }" ; break ;;
+                  esac
+                else
+                  SORGU_DUSTU=1
+                fi
+                sleep 10
+              done
+            fi
+
+            # Kırmızının beş sebebi kapıda ayrı ayrı okunuyor: kapıya gelen
+            # sahip "hangisi" olduğunu açıklamadan görebilmeli. Dördü
+            # derleyicinin hükmü değil, hükmü **almanın** kendisinin arızası.
+            # Sıra rastgele değil: sorgu arızası koşunun yokluğundan önce
+            # sınanıyor, çünkü cevabı hiç alamamak "koşu yok" demenin dayanağı
+            # değildir.
+            if [ "$HUKUM" = "success" ]; then
+              DURUM_STATU=success; ACIKLAMA="CI yeşil"
+            elif [ -n "$HUKUM" ]; then
+              DURUM_STATU=failure; ACIKLAMA="CI hükmü yok: $HUKUM"
+            elif [ "$KIMLIKLI" = 0 ] && [ -z "$ONCEKI" ]; then
+              DURUM_STATU=failure; ACIKLAMA="Dispatch öncesi koşu sınırı okunamadı"
+            elif [ "$SORGU_DUSTU" = 1 ]; then
+              DURUM_STATU=failure; ACIKLAMA="Actions sorgusu düştü, hüküm okunamadı"
+            elif [ -z "$KOSU" ]; then
+              DURUM_STATU=failure; ACIKLAMA="Dispatch edilen CI koşusu bulunamadı"
+            else
+              DURUM_STATU=failure; ACIKLAMA="CI koşusu süre içinde bitmedi"
+            fi
+          else
+            # Dispatch hiç olmadı ya da (kimliksiz yolda) sınır okunamadı.
+            # İkisinin de karşılığı kırmızı; ayrımı açıklama taşıyor.
+            DURUM_STATU=failure
+            ACIKLAMA="${DISPATCH_HATA:-Dispatch öncesi koşu sınırı okunamadı}"
+          fi
+
+          # **Yazma denenip düşerse iş yeşil bitmemeli.**
+          #
+          # Hükmü hesaplamak yetmiyor; kapıya *ulaşması* gerekiyor. POST
+          # düştüğünde eskiden yalnızca uyarı vardı ve iş yeşil bitiyordu —
+          # yani kapı yine boş kalıyordu, bu sefer "hesaplamadım" diye değil
+          # "yazamadım" diye. Sahibin gördüğü şey aynı: hüküm yok.
+          #
+          # Önce üç deneme (geçici ağ/kota arızası bunun içinde geçer).
+          STATU_YAZILDI=0
+          for _ in 1 2 3; do
+            if gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/$SHA" \
+                 -f state="$DURUM_STATU" -f context="Sunum CI" \
+                 -f description="$ACIKLAMA" >/dev/null 2>&1; then
+              STATU_YAZILDI=1
+              echo "hüküm yazıldı: $DURUM_STATU · $ACIKLAMA"
+              break
+            fi
+            sleep 3
+          done
+          [ "$STATU_YAZILDI" = 1 ] || \
+            echo "::warning::Sunum hükmü SHA'ya yazılamadı ($SHA) — PR kapısı boş kalacak."
+
+          gh label create toplu --color 0E8A16 --description "Toplu sunum PR'ı" >/dev/null 2>&1 || true
+          gh label create sunuma-girmez --color B60205 --description "Toplu sunuma alınmaz" >/dev/null 2>&1 || true
+          gh pr edit "$PR_URL" --add-label toplu >/dev/null || echo "UYARI: etiket konamadı — bir sonraki tur bu sunumu görmeyebilir."
+
+          # Denetçi burada, tek sefer çağrılıyor. Bakıcının tekil PR'lara
+          # inceleme istememesinin sebebi bu satır.
+          #
+          # **Ücretsiz planda bu istek karşılıksız** ve ölçüldü (#613, 31
+          # Ağustos): sohbet komutu ücretli plana bağlı ve istek, insan
+          # hesabından yazılsa bile reddediliyor —
+          #
+          #   "The author of this PR is on the CodeRabbit Free Plan. In order
+          #    to use the Chat feature, please upgrade the PR author to
+          #    CodeRabbit Pro."
+          #
+          # İstek yine de gönderiliyor, çünkü plan değişebilir ve o gün bu
+          # satırın hatırlanması gerekmez. Değişen şey **ne yazdığımız**:
+          # "inceleme istendi" demek, istenen incelemenin olacağını ima
+          # ediyordu. Karşılıksız kalabilen bir isteği başarı diye yazmak,
+          # doktrinin yasakladığı yanıltıcı yeşilin sözlü hâli.
+
+          # ── Denetim hükmü ──────────────────────────────────────────────
+          #
+          # İsteği göndermek denetlendiğini göstermiyor. Ölçüldü (#529): sunum
+          # adımının açtığı iki PR'ın **ikisi de** hiç incelenmedi — denetçi
+          # sessiz kaldı, statü hiç yazılmadı, biri denetimsiz birleşti.
+          #
+          # Arıza sessiz olmasının sebebi kapının yokluğuydu: `Sunum CI` yeşil
+          # olduğu için PR hazır görünüyor ve hiçbir kol "bu PR incelendi mi"
+          # diye sormuyordu. Doktrinin "yanıltıcı yeşil görünür kılınır" kuralı
+          # yalnızca **statüsü `success` ama açıklaması kota olan** hâli
+          # kapsıyor; buradaki hâl daha sessiz — statü **hiç yok**, yani
+          # yanıltacak bir yeşil de, kontrol edilecek bir şey de yok.
+          #
+          # Hüküm burada, `Sunum CI` ile birebir aynı kalıpla yazılıyor:
+          # koşuyu başlatan taraf hükmü kendisi yazar. Ayna denendi ve
+          # güvenilmez çıktı; kapıda görünmeyen hüküm hüküm değildir.
+          case "${DENETIM_BEKLEME_HAM:-}" in
+            ''|*[!0-9]*) DENETIM_BEKLEME=12 ;;
+            *) DENETIM_BEKLEME="$DENETIM_BEKLEME_HAM" ;;
+          esac
+
+          DENETIM_STATU=failure
+          DENETIM_ACIKLAMA="Denetçi sessiz kaldı — sunum denetlenmedi"
+          BITIS=$(( $(date +%s) + DENETIM_BEKLEME * 60 ))
+
+          # Statüyü bağlam adına göre okuyan tek yer. İki denetçi ayrı
+          # bağlamlara yazıyor (`CodeRabbit`, `Denetci (NVIDIA)`) ve ikisi de
+          # aynı biçimde okunuyor: `state · description`.
+          #
+          # Açıklama **taşınıyor**, sabit bir metinle değiştirilmiyor: "kota"
+          # diyen bir statü ile "Review completed" diyen statü aynı kapıdan
+          # geçmemeli ve aradaki farkı yalnızca denetçinin kendi cümlesi
+          # taşıyor.
+          # `pending` **konuşmuş sayılmıyor** ve bu şart. Her iki denetçi de işe
+          # başlarken `pending "Denetim sürüyor"` yazıyor
+          # (`denetci-nvidia.yml`, `denetci.yml`). Bu satır olmadan aşağıdaki
+          # "ikisi de konuştu" kapısı, iki denetçi de **hâlâ çalışırken**
+          # tutuyor ve tur daha ilk saniyede `failure` yazıp çıkıyordu —
+          # beklemek için kurulmuş bir döngünün hiç beklememesi.
+          statu_oku() {
+            gh api "repos/${GITHUB_REPOSITORY}/commits/$SHA/status" \
+              --jq ".statuses[] | select(.context | ascii_downcase | contains(\"$1\")) | select(.state != \"pending\") | .state + \" · \" + .description" \
+              2>/dev/null | head -1
+          }
+
+          # Açıklamanın iki yarısı **ayrı ayrı** kırpılıyor, birleşik metin
+          # sonradan değil. Sonda kırpmak, uzun bir CodeRabbit açıklamasının
+          # NVIDIA yarısını tümden yemesi demekti: kapıda yalnızca bir denetçi
+          # görünür ve öteki "sessiz" sanılırdı — bu PR'ın kapatmaya çalıştığı
+          # yanılgının aynısı, bu kez kendi mesajımızın içinde.
+          #
+          # **Kesim baytla yapılıyor ve bu kasıtlı.** İlk hâli `${1:0:57}` +
+          # `…` idi ve iki yerden birden yanlıştı; denetçi ölçtü, ben doğruladım:
+          #
+          #   1. Adımın kabuğunda locale yok (`LANG` boş), yani `${#s}` ve
+          #      `${s:0:n}` **karakter değil bayt** sayıyor. `…` 3, `·` 2 bayt
+          #      olduğu için en kötü durum 139 değil **144 bayt** çıkıyordu —
+          #      GitHub'ın 140 tavanının üstünde.
+          #   2. 57. bayt bir Türkçe harfin ortasına düştüğünde kesim **geçersiz
+          #      UTF-8** üretiyordu. Ölçüldü: `ş` dizisinin yarısı kalıyor.
+          #      #633'ün denetçide kapattığı arızanın aynı sınıfı, bu kez burada.
+          #
+          # Çare de aynı depodan: `iconv -c` yarım diziyi atıyor. Bütçe 51 bayt
+          # gövde + 3 bayt `...` (ASCII, çok baytlı değil) = 54; iki yarı ve
+          # sabit ekle en kötü durum 12 + 54 + 4 + 8 + 54 = 132 bayt.
+          kirp() {
+            # Eşik bütçeyle **aynı** (54), 58 değil. Ayrıştıkları aralık sessiz
+            # bir delik açıyordu: 55–58 baytlık bir açıklama kırpılmadan geçiyor
+            # ve iki yarı birleşince toplam tam 140 bayta çıkıyordu — tavana
+            # sıfır paylı yasak biçimde değil ama aşağıdaki yorumun "en kötü
+            # durum 132 bayt" sözünü yalanlayarak. Denetçi ölçtü, doğruladım.
+            # Eşik bütçeye eşitlenince fonksiyonun sözü tutuyor: çıktı hiçbir
+            # koşulda 54 baytı geçmiyor ve en kötü durum gerçekten 132.
+            if [ "${#1}" -le 54 ]; then printf '%s' "$1"; return 0; fi
+            parca=$(printf '%s' "$1" | head -c 51 | iconv -c -f UTF-8 -t UTF-8 2>/dev/null || true)
+            printf '%s...' "$parca"
+          }
+
+          NV=""
+
+          while :; do
+            # İki bağımsız kanıt aranıyor ve biri yetiyor. Denetçi normalde
+            # ikisini birden bırakıyor (ölçüm #528: özet yorumu + `Review
+            # completed` statüsü); ikisini birden şart koşmak, birini yazıp
+            # ötekini yazamadığı bir turda denetlenmiş bir PR'ı kırmızı
+            # gösterirdi.
+            INCELEME=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_URL##*/}/reviews" \
+                         --jq 'length' 2>/dev/null) || INCELEME=0
+            if [ "${INCELEME:-0}" -gt 0 ]; then
+              DENETIM_STATU=success
+              DENETIM_ACIKLAMA="Denetçi inceledi ($INCELEME inceleme)"
+              break
+            fi
+
+            # **Tek denetçi kaldı (#745, 12 Eylül).** CodeRabbit çıkarıldı:
+            # Free katmanda satır bazlı inceleme hiç üretmiyordu ve 25
+            # Ağustos'tan beri 125 PR onun bulgusu olmadan birleşti (#748).
+            #
+            # Eski mantık iki sese kuruluydu ve mantıksal VEYA idi: biri
+            # `success` yazarsa yeşil, **ikisi de** hüküm yazarsa kırmızı.
+            # O ikinci koşul tek denetçiyle asla sağlanmaz — NVIDIA "bulgu
+            # var" dediğinde kapı hükmü anında değil, süre dolana kadar
+            # bekleyip yazardı. Şimdi tek sesin hükmü doğrudan okunuyor.
+            #
+            # `error` hâlâ KONUŞMAMIŞ sayılıyor ve sebebi değişmedi: uç nokta
+            # yanıt vermediğinde `denetci-nvidia.yml` `error` yazıyor, o bir
+            # kodun hükmü değil sağlayıcının susması. `failure` ile aynı
+            # kefeye konursa bir kesinti PR'ı kodun kusuruymuş gibi kilitler.
+            NV=$(statu_oku "nvidia") || NV=""
+
+            case "$NV" in
+              success*) DENETIM_STATU=success; DENETIM_ACIKLAMA="$NV"; break ;;
+              error*)   NV="" ;;
+              ?*)       DENETIM_STATU=failure; DENETIM_ACIKLAMA="$NV"; break ;;
+            esac
+
+            [ "$(date +%s)" -ge "$BITIS" ] && break
+            sleep 30
+          done
+
+          # Kırmızı açıklama iki denetçiyi birden anlatıyor. Tek denetçiyi
+          # işaret eden bir cümle, ötekinin hiç çağrılmadığı bir turda sahibi
+          # yanlış yere baktırırdı — arıza denetçide değil dispatch'te olabilir.
+          #
+          # "Sessiz" ile "çağrılamadı" **ayrı yazılıyor**: ikisi de boş bir
+          # statü bırakıyor ama biri denetçinin susması, öteki bizim hiç
+          # sormamış olmamız. Aynı kelimeye koymak, bu PR'ın düzelttiği
+          # teşhis hatasını mesajın içinde tekrarlamak olurdu.
+          NV_YOK="sessiz"
+          NV_YOK_UZUN="sessiz — statü yazmadı"
+          if [ "$DENETCI_DISPATCH" != 1 ]; then
+            NV_YOK="çağrılamadı"
+            NV_YOK_UZUN="**çağrılamadı** — dispatch düştü, denetçi hiç koşmadı"
+          fi
+          if [ "$DENETIM_STATU" != success ]; then
+            DENETIM_ACIKLAMA="CodeRabbit: $(kirp "${CR:-sessiz}") · NVIDIA: $(kirp "${NV:-$NV_YOK}")"
+          fi
+
+          # GitHub statü açıklamasını 140 karakterde kesiyor ve aşılırsa
+          # **yazmayı tümden reddediyor** — yani kapıda hüküm hiç görünmüyor.
+          #
+          # Bu satır emniyet kemeri değil, **başarı yolunun tek kırpması**:
+          # kapı yeşile döndüğünde açıklama yukarıdaki `kirp`ten hiç geçmiyor,
+          # denetçinin kendi cümlesi `state · description` olarak olduğu gibi
+          # taşınıyor (`DENETIM_ACIKLAMA="$CR"`). Denetçinin açıklaması kendi
+          # başına 140'a kadar çıkabildiği için önek eklendiğinde tavan
+          # aşılıyor ve kesim burada yapılıyor.
+          #
+          # Kesim `iconv -c` ile yapılıyor, çünkü `${s:0:137}` locale'siz
+          # kabukta **bayt** sayıyor ve 137. bayt çok baytlı bir harfin
+          # ortasına düştüğünde geçersiz UTF-8 üretiyor. Ölçüldü: aynı gövdeye
+          # tek bayt eklendiğinde kesim bir geçerli bir geçersiz çıkıyor.
+          # Geçersiz dizi JSON gövdesine kodlanamıyor, yani statü yazması üç
+          # denemede de düşüyor ve kapıda hüküm **hiç** görünmüyor — bu iş
+          # akışının kapatmak için var olduğu sessizliğin ta kendisi.
+          # #633'ün denetçide kapattığı arızanın aynı sınıfı.
+          if [ "${#DENETIM_ACIKLAMA}" -gt 140 ]; then
+            DENETIM_ACIKLAMA="$(printf '%s' "$DENETIM_ACIKLAMA" \
+              | head -c 137 | iconv -c -f UTF-8 -t UTF-8 2>/dev/null || true)..."
+          fi
+
+          # Yazma `Sunum CI` ile aynı ısrarla deneniyor: hesaplanmış ama
+          # yazılamamış bir hüküm, kapı için hiç hesaplanmamışla aynı şey.
+          DENETIM_YAZILDI=0
+          for _ in 1 2 3; do
+            if gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/$SHA" \
+                 -f state="$DENETIM_STATU" -f context="Sunum denetimi" \
+                 -f description="$DENETIM_ACIKLAMA" >/dev/null 2>&1; then
+              DENETIM_YAZILDI=1
+              echo "denetim hükmü yazıldı: $DENETIM_STATU · $DENETIM_ACIKLAMA"
+              break
+            fi
+            sleep 3
+          done
+          [ "$DENETIM_YAZILDI" = 1 ] || \
+            echo "::warning::Denetim hükmü SHA'ya yazılamadı ($SHA) — sunum denetimsiz ve bu görünmüyor."
+
+          # Kırmızı hüküm ayrıca gövdede de duruyor. Statü tek başına yeterdi
+          # ama sunum PR'ının okuyucusu sahip ve kapıdaki kırmızı bir satır,
+          # gövdedeki bir paragraf kadar anlatmıyor: **neyin** denetlenmediğini
+          # ve ne yapılabileceğini söyleyen bir cümle gerekiyor.
+          if [ "$DENETIM_STATU" != success ]; then
+            gh pr comment "$PR_URL" --body "$(printf '%s\n\n%s\n\n%s\n\n%s\n\n%s' \
+              "**Bu sunum denetlenmedi.** \`Sunum denetimi\` hükmü: $DENETIM_ACIKLAMA" \
+              "$(printf 'İki denetçinin %s dakika sonundaki durumu:\n\n| Denetçi | Statü |\n|---|---|\n| CodeRabbit | %s |\n| Denetçi (NVIDIA) | %s |' \
+                 "$DENETIM_BEKLEME" "${CR:-sessiz — statü yazmadı}" "${NV:-$NV_YOK_UZUN}")" \
+              "Kapı ikisinden **birinin** başarısını yeterli sayıyor; ikisi birden sustuğunda ya da ikisi de başarısız olduğunda kırmızı kalıyor." \
+                            "NVIDIA denetçisi \`workflow_dispatch\` ile çağrılıyor (bot yazarlı PR'da \`pull_request\` olayı doğmuyor ve iş akışı \`action_required\`da askıda kalıyordu). Orada da sessizlik görüyorsan koşu günlüğüne bak: dispatch düşmüş ya da \`NVIDIA_API_KEY\` yok olabilir.")" \
+              >/dev/null || echo "::warning::Denetimsizlik notu PR gövdesine yazılamadı."
+          fi
+
+          # Kırmızı bitiş **en sonda**, etiketleme ve inceleme isteğinden sonra.
+          #
+          # Sıra kasıtlı: sunum PR'ı zaten açıldı ve etiketi olmadan bir
+          # sonraki turun "açık sunum var mı" kapısı onu göremez, ikinci bir
+          # sunum açardı. Yani işi erken kesmek, kesilen turun bedelini bir
+          # sonrakine ödetiyor. Önce dosya kendi işini bitiriyor, sonra
+          # kapıda hüküm olmadığını söyleyerek kırmızı bitiyor.
+          if [ "$STATU_YAZILDI" != 1 ]; then
+            echo "Sunum hükmü kapıya yazılamadı — iş kırmızı bitiriliyor."
+            exit 1
+          fi

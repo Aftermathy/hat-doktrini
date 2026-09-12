@@ -1,0 +1,462 @@
+# SINIF: GENEL — projeden bağımsız, değiştirmeden kopyalanır
+name: Gemini PM
+
+# Gemini'yi ürün yöneticisi olarak çalıştırır: repo durumunu okur, sıradaki
+# görevi tek bir issue olarak açar. Tarayıcıdaki sohbet penceresi repoya
+# bağlanamaz — aktör olabilmesi için API üzerinden çağrılması gerekir.
+
+# Saate değil olaya bağlı: bir şey ilerlediğinde uyanır. Söyleyecek yeni bir
+# şey yoksa NO_TASK döner, o yüzden sık tetiklenmesinin maliyeti yok.
+# **Bu dosya merkezde ve `workflow_call` ile çağrılıyor.**
+#
+# Tetikleyici çağıran deponun sarmalayıcısında duruyor; burada yalnız iş var.
+# Sebebi tek kopya: bu hattı birden çok proje kullanıyor ve doktrin bir
+# projede değişip ötekilerde eskimemeli.
+#
+# Çağıran bağlam olduğu gibi korunuyor — `github.repository`, `github.event`,
+# `github.event_name`, `vars.*` ve `secrets: inherit` ile gelen anahtarlar
+# hepsi **çağıran deponun** değerleri.
+on:
+  workflow_call:
+
+concurrency:
+  group: gemini-pm
+  # Mühendis bir turda 5 PR kapatıyor; her kapanış PM'i uyandırırsa aynı repo
+  # durumu için 5 kez tam analiz yapılır. Bekleyen koşu iptal edilir — en son
+  # tetiklenen zaten en güncel durumu görür.
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  # Birleşen PR'ları ve denetçi yorumlarını okuyabilmesi için.
+  pull-requests: read
+  # Açtığı issue'yu iç kontrole yollayabilmesi için.
+  actions: write
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 50
+
+      - name: Son koşudan bu yana yeterli zaman geçti mi
+        id: debounce
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          # Ürün yöneticisinin söyleyecek yeni sözü ancak durum değiştiğinde
+          # oluşur. Arka arkaya gelen olaylarda saatte birden sık analiz, aynı
+          # cevabı daha pahalıya almaktır. Zamanlanmış ve elle tetikleme bu
+          # freni atlar.
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          SON=$(gh run list --workflow "Gemini PM" --status success --limit 1 --json createdAt --jq '.[0].createdAt // empty' || true)
+          if [ -z "$SON" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          GECEN=$(( ( $(date +%s) - $(date -d "$SON" +%s) ) / 60 ))
+          if [ "$GECEN" -lt 45 ]; then
+            echo "Son başarılı koşu ${GECEN}dk önceydi; bu tetikleme atlanıyor."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Anahtar var mı
+        id: guard
+        if: steps.debounce.outputs.ok == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_FALLBACK_MODEL: ${{ vars.CLAUDE_FALLBACK_MODEL || 'claude-sonnet-5' }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "GEMINI_API_KEY tanımlı değil — Settings > Secrets > Actions'a ekle." >&2
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Repo durumunu topla
+        if: steps.debounce.outputs.ok == 'true' && steps.guard.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Kaynak yolları projeye aittir ve .agentrc'den gelir. Dosya yoksa
+          # geniş varsayılanlara düşülür ve uyarı basılır: eksik dosyayla koşan
+          # ajan sessizce boş bağlamla çalışmamalı.
+          VARSAYILAN_YOLLAR="src"
+          VARSAYILAN_UZANTILAR="ts tsx js jsx py rs go swift kt java c cpp h sql"
+          if [ -f .agentrc ]; then
+            . ./.agentrc
+          else
+            echo "UYARI: .agentrc yok — kaynak dökümü varsayılan yollardan alınacak." >&2
+          fi
+          KAYNAK_YOLLARI="${KAYNAK_YOLLARI:-$VARSAYILAN_YOLLAR}"
+          KAYNAK_UZANTILARI="${KAYNAK_UZANTILARI:-$VARSAYILAN_UZANTILAR}"
+
+          kaynak_dosyalari() {
+            args=()
+            for u in $KAYNAK_UZANTILARI; do
+              [ "${#args[@]}" -gt 0 ] && args+=(-o)
+              args+=(-name "*.${u}")
+            done
+            # shellcheck disable=SC2086 — yollar bilerek sözcüklere ayrılıyor
+            find $KAYNAK_YOLLARI -type f \( "${args[@]}" \) 2>/dev/null | sort
+          }
+
+          KAYNAK_LISTESI=$(kaynak_dosyalari || true)
+          if [ -z "$KAYNAK_LISTESI" ]; then
+            echo "UYARI: kaynak dökümü boş — ajan kaynak kodu görmeden karar verecek. .agentrc yollarını denetle: $KAYNAK_YOLLARI" >&2
+          fi
+
+          # Dökümün sırasını belirleyen sorgu. PM'in tek bir ham notu yok;
+          # onun "konusu" yol haritasının açık kısmı ve masadaki issue'lardır.
+          # Sıralama olmadan bütçe ALFABETİK kesiyordu: 191 dosyanın ilk 13'ü
+          # gidiyor, DayOfMonthGrid.tsx'te duruyordu — yani OcrSheet.tsx,
+          # StatusScreen.tsx, TabBar.tsx ve src/lib/ hiçbir zaman görünmüyordu.
+          # PM aylarca alfabenin insafında koştu ve bu hiçbir yerde belli olmadı.
+          {
+            grep -nE '^#{1,3} |^- \[ \]' docs/ROADMAP.md | tail -60
+            gh issue list --state open --limit 60 --json title,labels \
+              --jq '.[] | "\(.title) [\(.labels|map(.name)|join(","))]"'
+          } > pm_sorgu.txt 2>/dev/null || : > pm_sorgu.txt
+
+          # 400 KB'den 120 KB'ye indirildi (25 Ağustos). Ölçüm: PM çağrısı
+          # başına girdi 21 Ağustos'ta 106K token'ken 24 Ağustos'ta 125K'ya
+          # çıktı ve tek başına en büyük kalem kaynak dökümüydü. 400 KB, ürün
+          # yöneticisinin yazacağı şartname için okuduğundan fazlası: kaynak
+          # seçici zaten **ilgiye göre** sıralıyor, yani kesilen kısım en az
+          # ilgili olan. Denetçi mühendisin bütçesi 60 KB ve o daha teknik bir
+          # iş yapıyor; PM'in ondan yedi kat fazlasını okuması bir karar değil,
+          # bir kalıntıydı.
+          PM_KAYNAK_BUTCESI=${PM_KAYNAK_BUTCESI:-120000}
+          node .github/scripts/kaynak-sec.mjs \
+            --not pm_sorgu.txt --butce "$PM_KAYNAK_BUTCESI" \
+            --yollar "$KAYNAK_YOLLARI" --uzantilar "$KAYNAK_UZANTILARI" \
+            --haric "${KAYNAK_HARIC:-}" --her-zaman "${KAYNAK_HER_ZAMAN:-}" \
+            --sozluk "${SOZLUK_DOSYASI:-}" > pm_secilen.txt
+          PM_ATLANAN=$(printf '%s\n' "$KAYNAK_LISTESI" | grep -vxF -f pm_secilen.txt || true)
+
+          {
+            echo "# Kim olduğun"
+            cat docs/PRODUCT-DNA.md
+            echo
+            echo "# Alan sözlüğü — kavramların tek adı"
+            # Aynı kavramı dört ayrı model dört ayrı adla konuşuyordu.
+            # Sözlük kısa ve bütçe dışı: kesilirse hiç yazılmamış sayılır.
+            cat CONTEXT.md
+            echo
+            echo "# Yol haritası ve sabit kararlar"
+            cat docs/ROADMAP.md
+            echo
+            echo "# Baş mühendisin sana notları (en yeni 25, özet)"
+            # Notlar `docs/notes/` altında tarih adlı ayrı dosyalarda durur
+            # (çakışmayı önlemek için). Eskiler koda ve haritaya çoktan
+            # işlendi; bağlamı en yeni birkaç düzine not taşır.
+            #
+            # **Özet giriyor, tam metin değil.** Blok 25 Ağustos'a kadar
+            # bütçesizdi: en yeni 25 not 110 KB'ydi ve PM prompt'unun beşte
+            # birini tek başına yiyordu. Kararın varlığı ile gerekçesinin
+            # tamamı ayrı şeyler; ikincisi dosyada duruyor.
+            node .github/scripts/not-ozet.mjs \
+              --dizin docs/notes --adet 25 --butce "${NOT_BUTCESI:-18000}" || true
+            echo
+            echo "# Proje kuralları"
+            cat CLAUDE.md
+            echo
+            echo "# Son commitler"
+            git log --oneline -20
+            echo
+            # Dosya adları neyin var olduğunu söylemiyor. Kaynak birkaç on bin
+            # token'dır, modern bağlam pencerelerinde yer kaplamaz; tamamı gitsin.
+            echo "# Kaynak kod"
+            echo "Aşağıdakiler yol haritasının açık kısmına ve masadaki issue'lara"
+            echo "en ilgili görülen dosyalardır, ilgi sırasıyla."
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              echo "## $f"
+              echo '```'
+              cat "$f"
+              echo '```'
+              echo
+            done < pm_secilen.txt
+            if [ -n "$PM_ATLANAN" ]; then
+              echo "## İçeriği gönderilmeyen dosyalar (yalnızca adları)"
+              printf -- '- %s\n' $PM_ATLANAN
+              echo "İçeriğini görmediğin dosya hakkında kesin hüküm verme."
+            fi
+            echo
+            echo "# Açık issue'lar"
+            gh issue list --state open --json number,title,labels,body \
+              --jq '.[] | "## #\(.number) \(.title) [\(.labels|map(.name)|join(", "))]\n\(.body[0:800])"'
+            echo
+            # Kapanmış işler de görünüyor — yalnızca başlıklarıyla.
+            #
+            # Sebep ölçüldü: aynı iş üç kez şartnameye çevrildi (CI'ya vitest
+            # ekleme #415→#476→#516, Edge Function tip denetimi #430→#479→#515).
+            # Üçünde de iş `main`'de çoktan duruyordu. PM yalnızca AÇIK issue'ları
+            # görüyordu, yani kendi kapattığı işin hafızası yoktu ve boşluğu
+            # "eksik" diye okudu. Kapalı başlıklar ucuz (satır başına birkaç
+            # kelime) ve bu döngüyü kesiyor.
+            echo "# Son kapanan işler — bunları YENİDEN AÇMA"
+            echo "Aşağıdaki başlıklar zaten yapıldı ve kapandı. Aynı işi ikinci"
+            echo "kez şartnameye çevirmeden önce \`main\`'e bak; doktrin kuralı:"
+            echo "\"şu koruma yok\" diyen bir madde, ilk iş korumanın yokluğunu"
+            echo "doğrulamaktır."
+            gh issue list --state closed --limit 40 --json number,title \
+              --jq '.[] | "- #\(.number) \(.title)"' 2>/dev/null || true
+            echo
+            # Proje sahibi bir işi kapatırken ne öğrendiğini yoruma yazıyor.
+            # Yalnızca başlıkları okumak o bilgiyi çöpe atar.
+            echo "# Açık PR'ların gövdeleri — mühendisin birleşme öncesi notları"
+            gh pr list --state open --json number,title,isDraft,body \
+              --jq '.[] | "## PR #\(.number) \(.title) (taslak: \(.isDraft))\n\(.body[0:900])"'
+            echo
+            echo "# Kapanmış son issue'lar — kapanış yorumları dahil"
+            gh issue list --state closed --limit 8 --json number,title,body,comments \
+              --jq '.[] | "## #\(.number) \(.title)\n\(.body[0:500])\n" +
+                    (if (.comments|length) > 0
+                     then "### Yorumlar\n" + ([.comments[] | "- [\(.author.login)] \(.body[0:600])"] | join("\n"))
+                     else "" end)'
+            echo
+            echo "# Birleşen son PR'lar — ne sevk edildi, sahip sonradan ne dedi"
+            gh pr list --state merged --limit 8 --json number,title,body,comments \
+              --jq '.[] | "## PR #\(.number) \(.title)\n\(.body[0:600])\n" +
+                    (if (.comments|length) > 0
+                     then "### Yorumlar\n" + ([.comments[-3:][] | "- [\(.author.login)] \(.body[0:400])"] | join("\n"))
+                     else "" end)' 2>/dev/null \
+            || gh pr list --state merged --limit 8 --json number,title,body \
+              --jq '.[] | "## PR #\(.number) \(.title)\n\(.body[0:600])"'
+            echo
+            echo "# Açık PR'lar"
+            gh pr list --state open --json number,title,isDraft \
+              --jq '.[] | "- #\(.number) \(.title) (taslak: \(.isDraft))"'
+            echo
+            echo "# Denetçinin son yorumları — tekrar eden bir konu varsa sinyaldir"
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/comments?per_page=30&sort=created&direction=desc" \
+              --jq '.[] | "- [\(.user.login)] \(.path): \(.body[0:220])"' 2>/dev/null || echo "  (yorum yok)"
+          } > context.md
+          wc -l context.md
+
+      - name: Sıradaki görevi Gemini'ye sor
+        if: steps.debounce.outputs.ok == 'true' && steps.guard.outputs.ok == 'true'
+        id: ask
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_FALLBACK_MODEL: ${{ vars.CLAUDE_FALLBACK_MODEL || 'claude-sonnet-5' }}
+          MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "${GITHUB_REPOSITORY} projesinin vizyoner direktörü ve ürün"
+            echo "yöneticisisin. Aşağıdaki 'Kim olduğun' bölümü senin karakterin —"
+            echo "önce onu oku ve o kişi olarak düşün. Görevin, sıradaki TEK işi bir"
+            echo "GitHub issue metni olarak yazmak."
+            echo
+            echo "## Biçim"
+            echo "- İlk satır issue başlığı; markdown başlık işareti kullanma."
+            echo "- İkinci satır İSTEĞE BAĞLI etiket satırı, örn. 'Etiketler: lokal' ya"
+            echo "  da 'Etiketler: sende, needs-device' ya da 'Etiketler: acil'."
+            echo "- **lokal SADECE şunlardır:** veritabanına migration uygulamak,"
+            echo "  Edge Function dağıtmak, simülatörde/API ile test koşmak,"
+            echo "  depo dışı komut çalıştırmak. Kod yazılacak her iş —"
+            echo "  bileşen düzeltmesi, i18n, tip hatası, erişilebilirlik dahil —"
+            echo "  bulut mühendisinindir ve ETİKETSİZ bırakılır. Bir işi yerel"
+            echo "  ajan test edecek diye ona lokal yazma: etiket işi KİMİN"
+            echo "  YAPACAĞINI söyler, kimin doğrulayacağını değil."
+            echo "- **lokal vs sende ayrımı:** veritabanı migration'ı, Edge Function"
+            echo "  dağıtımı, simülatör koşusu, depo dışı komut → 'Etiketler: lokal'"
+            echo "  (yerel ajan yapar). Yalnızca fiziksel cihaz, mağaza/ödeme hesabı,"
+            echo "  sağlayıcı paneli, kart ya da kimlik gerektiren iş → 'Etiketler: sende'."
+            echo "  Bulutun yapamadığı her işi sahibe yazma; çoğu yerel ajanındır."
+            echo "  Yalnızca sende, needs-device ve acil geçerli. agent-ready ASLA —"
+            echo "  onay sahibindedir. acil'i yalnızca gerçekten engelleyen iş için"
+            echo "  kullan (çökme, veri kaybı, güvenlik); sıra atlatır, kapı atlatmaz."
+            echo "  İnsana ait iş (cihaz testi, hesap, anahtar, SQL çalıştırma) sende"
+            echo "  etiketi taşımak ZORUNDA, yoksa sahibin kuyruğunda görünmez."
+            echo "- Kalan satırlar gövde: kapsam, teknik direktifler, başarı kriteri,"
+            echo "  kapsam dışı bölümleriyle."
+            echo "- Aynı anda birden fazla iş önerme. Bir issue, bir konu."
+            echo "- Belgelerin yazıldığı dilde yaz."
+            echo
+            echo "## Karar kuralları"
+            echo "- Ürünün kabul ölçütleri 'Kim olduğun' bölümünde tanımlı. Issue'yu"
+            echo "  yazmadan önce kendi önerini o ölçütlere karşı sına; geçemiyorsa"
+            echo "  öneriyi değiştir, geçtiğini issue'da bir cümleyle belirt."
+            echo "- Teknik kısıtlar 'Proje kuralları' bölümünde. Şartname onlara uymalı."
+            echo "- Baş mühendisin notlarını ciddiye al; kodda gördüğü kısıtlar plandan"
+            echo "  üstündür. Bir notu görmezden geliyorsan gerekçesini issue'da yaz."
+            echo "- Kaynak kodu okudun; planda yazan ile kodda olan çelişiyorsa kod esastır."
+            echo "- Yol haritasındaki kapanmış kararları yeniden açma."
+            echo "- Sıradaki işi yol haritasından oku, kendin uydurma. TEK İSTİSNA:"
+            echo "  yol haritasının Fazlar bölümü boşsa (yeni proje) bu koşunun işi"
+            echo "  fazları taslamaktır. DNA'yı ve kodu oku, ürünü fazlara böl, her"
+            echo "  fazın kapsamını ve sırasının gerekçesini yaz, bağımlılıkları"
+            echo "  belirt. Hepsini onay kutulu (- [ ]) TEK issue olarak sun ve sona"
+            echo "  yaz: 'Sahip kutuları düzeltip agent-ready verdiğinde bu issue'nun"
+            echo "  işi, onaylanan fazları docs/ROADMAP.md içine yazmaktır.'"
+            echo "- DNA veya sahibin yorumları mevcut haritayla çelişir hale geldiyse"
+            echo "  faz sonunu bekleme: harita revizyonunu öneren, aynı onay kutulu"
+            echo "  biçimde bir issue aç. Fazları yeniden çizmek de bir iştir ve"
+            echo "  onaydan geçer."
+            echo "- Birleşen PR'lara bak: bir faz fiilen bittiyse sıradakine geç."
+            echo "- Denetçi yorumlarında tekrar eden bir konu varsa bu bir sinyaldir;"
+            echo "  tek tek kod hatalarını issue yapma ama kalıplaşmış bir sorunu ele al."
+            echo "- \`sende\` etiketli issue'lar insana ait; onlar için görev üretme."
+            echo "- **Proje sahibinin yorumlarındaki istekler en yüksek önceliktir.**"
+            echo "  Kapanan issue'ların yorumlarını tara: sahip yeni bir şey istemiş"
+            echo "  ve bu hiçbir açık issue'nun kapsamında değilse, o iş açılır."
+            echo "  Büyük bir fazın açık olması bunu bastırmaz — geniş bir issue her"
+            echo "  şeyi kapsıyor sayılmaz."
+            echo "- NO_TASK yalnızca gerçekten yeni bir şey yoksa yazılır: sahibin"
+            echo "  karşılıksız kalmış bir isteği varsa NO_TASK yanlış cevaptır."
+            echo "- **Projeye özel kapılar 'Proje kuralları' bölümündedir.** Orada"
+            echo "  birleşme sonrası insan adımı gerektiren bir kural tanımlıysa"
+            echo "  (örn. veritabanı değişikliğinin elle çalıştırılması) ve birleşen"
+            echo "  PR'lar arasında karşılığı henüz açılmamış böyle bir iş varsa, bu"
+            echo "  koşunun işi ODUR: 'Etiketler: lokal' ile, adımları sırasıyla"
+            echo "  sayan ve nasıl doğrulanacağını yazan bir issue aç."
+            echo "- **Çöken yığın yeniden planlanır.** Birleşmeden kapanan bir PR'ın"
+            echo "  üstüne kurulu PR'lar varsa onların issue'ları artık geçersiz bir"
+            echo "  temele dayanıyor demektir; durumu anlatan ve yeniden planlayan bir"
+            echo "  issue aç."
+            echo
+            echo "## Faz sonu"
+            echo "Yol haritasındaki bir fazın işleri bittiyse (issue'ları kapandı,"
+            echo "PR'ları birleşti) sıradaki faza geçmeden önce iki iş açılır. Bu"
+            echo "koşuda hangisi eksikse onu yaz."
+            echo
+            echo "1. **İKİ AYRI stres testi issue'su** — tek listede iki aktör"
+            echo "   olursa biri bitse de issue kapanmaz. Bu koşuda hangisi"
+            echo "   eksikse onu aç:"
+            echo "   a) **'Faz N stres testi — yerel'**: simülatörde ve API"
+            echo "      üzerinden doğrulanabilenler — sınır girdiler, yetkisiz"
+            echo "      rol ve doğrudan RLS denemeleri, odak/klavye akışları, ağ"
+            echo "      kapatılarak taklit edilen kesintiler, dar cihazda taşma."
+            echo "      Etiket önerme; sahip onaylayınca yerel mühendis koşar."
+            echo "   b) **'Faz N stres testi — cihaz'**: yalnızca gerçek donanımın"
+            echo "      kanıtlayabildikleri — haptik his, dokunmatik akıcılık,"
+            echo "      gerçek uçak modu, sistem ayarlarından izin değişikliği,"
+            echo "      bildirimin fiilen düşmesi. İkinci satıra"
+            echo "      'Etiketler: sende, needs-device' yaz."
+            echo "   **Tek liste kuralı:** açmadan önce önceki fazın stres testi"
+            echo "   issue'su hâlâ açıksa, onu devral ve kapat: işaretsiz"
+            echo "   maddelerinden hâlâ anlamlı olanları yeni listeye taşı,"
+            echo "   kalanları neden düştüğünü yazarak bırak. İki faz sonu testi"
+            echo "   aynı anda açık kalamaz; öneri listeleri için de aynı kural."
+            echo "   **Tek kişi kuralı:** sahip yalnız ve tek cihazı var. İkinci"
+            echo "   insan, ikinci telefon ya da eşzamanlı iki oturum isteyen"
+            echo "   maddeyi cihaz listesine YAZMA — çok taraflı senaryoları (iki"
+            echo "   üye, rol değişimi, realtime senkron) ve klavye/odak/inert/"
+            echo "   erişilebilirlik maddelerini yerel listeye koy. Cihaz"
+            echo "   listesinde yalnızca elle hissedilen kalır: haptik, dokunmatik"
+            echo "   akıcılık, gerçek ağ kesintisi, sistem ayarı, bildirimin"
+            echo "   fiilen düşmesi."
+            echo "   Her madde onay kutusu olsun, nasıl doğrulanacağı yazsın ve"
+            echo "   **işaretsiz** açılsın. Stres testi hiçbir işi bloke etmez;"
+            echo "   açıkken de sıradaki işler alınmaya devam eder."
+            echo
+            echo "2. **'Faz N sonu: öneriler ve yol haritası güncellemesi'** — o faz"
+            echo "   boyunca biriken her şeyi tek yerde topla ve **onay kutulu bir"
+            echo "   liste** olarak sun:"
+            echo "   - mühendislik notlarında açık kalan ürün kararları"
+            echo "   - denetçi yorumlarında tekrar eden kalıplar"
+            echo "   - proje sahibinin issue ve PR yorumlarında geçen, henüz iş"
+            echo "     olmamış istekler"
+            echo "   - kodda görülüp planda olmayan eksikler"
+            echo "   Her madde tek satır, \`- [ ]\` ile başlasın, yanında bir cümle"
+            echo "   gerekçe olsun. Gruplandır: 'Sonraki faza', 'Sonraya', 'Yeni faz"
+            echo "   gerektirir', 'Çıkarılması önerilenler', 'Önerilmez'."
+            echo "   Çıkarma grubu haritada durup gerekçesi kaybolmuş işler içindir:"
+            echo "   kodun kendiliğinden çözdüğü, sahibin artık anmadığı, alternatifin"
+            echo "   geçersiz kıldığı. Neden gereksizleştiğini yaz."
+            echo "   Gövdenin sonuna şunu yaz: 'Sahip istediklerini işaretledikten"
+            echo "   sonra \`agent-ready\` etiketi ekler; bu issue'nun işi, işaretli"
+            echo "   maddeleri \`docs/ROADMAP.md\` içine doğru faza ve doğru sıraya"
+            echo "   yazmaktır. Gerekiyorsa yeni bir faz açılır.'"
+            echo "   Etiketsiz bırak — onay sahibindedir."
+            echo
+            echo "## Çakışma — issue'yu yazmadan önce"
+            echo "Açık issue'ları ve açık PR'ları tara. Yazacağın iş bunlardan biriyle"
+            echo "aynı ekrana, aynı modüle veya aynı tabloya dokunacaksa üç seçenekten"
+            echo "birini seç ve issue'da hangisini seçtiğini yaz:"
+            echo "1. **Birleştir** — iki iş ayrı yapılınca birbirini bozacaksa tek bir"
+            echo "   issue yaz ve ikisini birlikte tarif et."
+            echo "2. **Sırala** — biri diğerinin üstüne kurulmak zorundaysa issue'nun"
+            echo "   başına şu satırı koy: '**Bağımlılık:** Bu iş #<numara> üzerine"
+            echo "   kurulmalı; önce o birleşmeli.'"
+            echo "3. **Ayır** — örtüşme yoksa hiçbir şey ekleme, gereksiz bağımlılık"
+            echo "   yaratma."
+            echo "Sessizce iki bağımsız issue yazma: ajan onları ayrı dallarda kurar ve"
+            echo "birleştirirken çakışırlar."
+            echo
+            cat context.md
+          } > prompt.md
+
+          # Metin üretimi tek kapıdan geçer: birinci sağlayıcının kotası
+          # dolduğunda ikincisi devralır, akış durmaz.
+          bash .github/scripts/llm.sh prompt.md out.md 8000
+
+          if [ ! -s out.md ]; then
+            echo "Gemini boş yanıt döndü. Ham cevap:" >&2
+            head -c 2000 resp.json >&2
+            exit 1
+          fi
+
+          if head -1 out.md | grep -q 'NO_TASK'; then
+            echo "Gemini yeni görev önermedi — mevcut backlog yeterli."
+            echo "create=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "create=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Issue aç
+        if: steps.debounce.outputs.ok == 'true' && steps.guard.outputs.ok == 'true' && steps.ask.outputs.create == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Farklı modeller çıktıya boş satır ya da kod çiti ile başlayabiliyor;
+          # başlık ilk DOLU satırdan alınır, yoksa iş açılmaz — boş başlıkla
+          # issue açmayı denemek tüm koşuyu düşürüyordu.
+          sed -i '/^```/d' out.md
+          TITLE=$(grep -m1 -v '^[[:space:]]*$' out.md | sed 's/^#\{1,6\} *//' | cut -c1-200 || true)
+          if [ -z "$TITLE" ]; then
+            echo "Model başlıksız çıktı üretti; issue açılmıyor." >&2
+            exit 0
+          fi
+
+          # İsteğe bağlı ikinci satır: "Etiketler: lokal | sende, needs-device".
+          # Yalnızca bu ikisi geçirilir — agent-ready buradan asla geçemez;
+          # onay etiketini yalnızca sahip verir.
+          EXTRA_LABELS=""
+          SECOND=$(sed -n '2p' out.md)
+          BODY_FROM=2
+          if printf '%s' "$SECOND" | grep -qi '^etiketler:'; then
+            BODY_FROM=3
+            for l in $(printf '%s' "$SECOND" | cut -d: -f2- | tr ',' ' '); do
+              case "$l" in
+                lokal|sende|needs-device|acil) EXTRA_LABELS="$EXTRA_LABELS --label $l" ;;
+              esac
+            done
+          fi
+          tail -n +"$BODY_FROM" out.md > body.md
+          printf '\n\n---\n_Bu issue Gemini PM iş akışı tarafından otomatik açıldı._\n' >> body.md
+
+          gh label create gemini \
+            --color 5319e7 \
+            --description "Gemini PM tarafından önerildi" \
+            --force >/dev/null 2>&1 || true
+
+          # shellcheck disable=SC2086 — EXTRA_LABELS bilerek sözcüklere ayrılıyor
+          gh label create internal-check --color 1d76db \
+            --description "Ic kontrolde: muhendis ve mimar gorus bildirecek" --force >/dev/null 2>&1 || true
+          URL=$(gh issue create --title "$TITLE" --body-file body.md --label gemini --label internal-check $EXTRA_LABELS)
+          echo "$URL"
+          gh workflow run "İç kontrol" -f issue="${URL##*/}" || true
