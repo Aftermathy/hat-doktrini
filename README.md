@@ -88,17 +88,29 @@ doğurmaz. Süresini uzun verin; dolduğunda hat sessizce durur.
 | `GEMINI_MODEL` | `gemini-3.6-flash` |
 | `NVIDIA_ARCHITECT_MODEL` | `deepseek-ai/deepseek-v4-pro-0813` |
 | `TOPLU_ARALIK_SAAT` | `4` |
+| `DUYU_KALIP` | projenin arayüz dosyaları, örn. `^\+\+\+ b/(src/\|.*\.css$)` — mimarın çağrılacağı fark |
 
 **Etiketler:** `agent-ready`, `internal-check`, `needs-approval`, `kusurlu`,
-`taslak`, `lokal`, `sende`, `needs-device`, `gemini`, `toplu`, `acil`.
-Biri eksikse o yol sessizce kapalı kalır.
+`taslak`, `lokal`, `sende`, `needs-device`, `gemini`, `toplu`,
+`sunuma-girmez`, `acil`. Biri eksikse o yol sessizce kapalı kalır.
+
+**Depo ayarları:** yalnız merge commit açık (squash ve rebase kapalı), dal
+otomatik silinir, Actions PR açabilir. `kur.sh` yazar; gerekçe
+`KURULUM.md` §4.
 
 ## Burada olmayan, projede kalan
 
 - `ci.yml` — projenin kendi derleme ve test komutları
 - `CLAUDE.md` — projenin kuralları ve tuzakları
-- `PRODUCT-DNA.md`, `ROADMAP.md`, `CONTEXT.md`
-- `pr-check` içindeki `DUYU_KALIP` gibi projeye özgü ayarlar
+- `PRODUCT-DNA.md`, `ROADMAP.md`, `CONTEXT.md`, `docs/roles/mimar.md`
+- `.agentrc` — kaynak dökümünün yolları
+- `DUYU_KALIP` depo değişkeni gibi projeye özgü ayarlar
+
+## Burada olup projeye kopyalanan
+
+- `.claude/skills/` — yerel ajanın skill'leri (`sorgulama`, `prototip`,
+  `sartname-uyumu`, `prompt-butcesi`, …); `kur.sh` kopyalar. Merkezde
+  değişirse `kur.sh` yeniden koşturulur.
 
 ## Doktrin
 

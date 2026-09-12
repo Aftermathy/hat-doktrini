@@ -24,8 +24,9 @@ Hedef projenin kökünde:
 curl -sL https://raw.githubusercontent.com/Aftermathy/hat-doktrini/v1/tools/kur.sh | bash
 ```
 
-Betik on altı sarmalayıcıyı indirir, on bir etiketi ve altı depo değişkenini
-açar. Gizli anahtarları **açmaz** — onlar aşağıda.
+Betik sürüm arşivinden on altı sarmalayıcıyı ve yerel ajanın skill'lerini
+kopyalar, on iki etiketi ve altı depo değişkenini açar, doktrinin şart
+koştuğu üç depo ayarını yazar. Gizli anahtarları **açmaz** — onlar aşağıda.
 
 Farklı sürüm için: `HAT_SURUM=v2 bash tools/kur.sh`
 
@@ -60,28 +61,64 @@ bir yerde olur.
 
 Bunlar kopyalanmaz, bu proje için yazılır:
 
-| Dosya | Ne |
-|---|---|
-| `.github/workflows/ci.yml` | projenin derleme ve test komutları |
-| `CLAUDE.md` | projenin kuralları, doğrulama komutları, tuzakları |
-| `docs/PRODUCT-DNA.md` | ürünün ne olduğu ve olmadığı |
-| `docs/ROADMAP.md` | fazlar — `roadmap-keeper` bunu PR'ların `Closes #N` atfından günceller |
-| `CONTEXT.md` | kavram sözlüğü; aynı kavramın dört ajanda dört adı olmasın diye |
+| Dosya | Ne | Yoksa |
+|---|---|---|
+| `.github/workflows/ci.yml` | projenin derleme ve test komutları | kesin hüküm yok; hiçbir PR birleşemez |
+| `CLAUDE.md` | projenin kuralları, doğrulama komutları, tuzakları | mühendis ve denetçi kör |
+| `docs/PRODUCT-DNA.md` | ürünün ne olduğu ve olmadığı | ürün yöneticisi karaktersiz |
+| `docs/ROADMAP.md` | fazlar — `roadmap-keeper` bunu PR'ların `Closes #N` atfından günceller; **Fazlar bölümü boş başlar**, doğuş ritüeli doldurur | PM sıradaki işi bulamaz |
+| `CONTEXT.md` | kavram sözlüğü; aynı kavramın dört ajanda dört adı olmasın diye | her PR'da ad pazarlığı |
+| `docs/roles/mimar.md` | mimarın talimatı (`internal-check` buradan okur); Vault'unki örnek, ölçüler DNA'da | **mimar hüküm vermez** — sessizce |
+| `.agentrc` | kaynak dökümü yolları ve uzantıları (`KAYNAK_YOLLARI`, `KAYNAK_UZANTILARI`, `KAYNAK_HER_ZAMAN`) | `src` varsayılanı ve uyarı |
+| `docs/notes/` | mühendislik notları, her biri kendi dosyasında (`kur.sh` dizini açar) | özet boş döner |
+| `docs/ENGINEERING-NOTES.md` | **geçici işaretçi**: `gemini-triage` ve `gemini-revise` eski yolu hâlâ `cat` ile okuyor; yoksa o adımlar `set -e` altında düşer. İçine "notlar `docs/notes/` altında" yazın; merkez özete geçince silinir | triyaj ve revizyon düşer |
 
-### 3. `pr-check` içindeki `DUYU_KALIP`
+### 3. Mimarın çağrılacağı dosya kalıbı — `DUYU_KALIP`
 
-Mimar pahalı ve yalnız **duyuya dokunan** farkta çağrılıyor. Kalıp bu depoda
-Vault'un yollarıyla yazılı (`src/`, `.css`, `tailwind.config`, iOS arayüz
-dosyaları). Bu projede kullanıcının gördüğü dosyalar başka yerdeyse kalıbı ona
-göre yazın — ve **dar tutun**, denetim PR başına fiyatlanıyor.
+Mimar pahalı ve yalnız **duyuya dokunan** farkta çağrılıyor. Kalıp bir depo
+değişkenidir; kullanıcının gördüğü dosyalar bu projede neredeyse onu yazın
+ve **dar tutun**, denetim PR başına fiyatlanıyor:
+
+```sh
+gh variable set DUYU_KALIP --body '^\+\+\+ b/(src/|.*\.css$|tailwind\.config)'
+```
+
+Tanımsızsa merkez Vault'un kalıbına düşer (`src/`, `.css`, `tailwind.config`
+ve Vault'un iOS dosyaları) ve koşu günlüğüne uyarı basar. (`v1` etiketinde
+kalıp henüz gömülüdür; değişken `v2`'den itibaren okunur.)
+
+### 4. Depo ayarları
+
+`kur.sh` `gh` varsa üçünü yazar; elle kontrol için Settings → General:
+
+- Pull Requests: yalnız **Allow merge commits** açık; squash ve rebase
+  **kapalı**. Squash, sunumdaki tekil PR'ların commit'lerini `main`'den
+  erişilemez yapar ve `Closes #N` hiç işlemez.
+- **Automatically delete head branches** açık — tur başına bir sunum dalı
+  doğuyor.
+- Actions → General → Workflow permissions: **Allow GitHub Actions to create
+  and approve pull requests** açık. Kapalıyken sunum dalı itilir ama PR
+  açılamaz.
+
+Depo **özelse** Actions dakikası ücretsiz kotayla sınırlı. Kota bittiğinde
+her job iki saniyede, runner atanmadan, log üretmeden düşer — kod hatası gibi
+görünmez. Hattın tamamı sessizce durur.
+
+### 5. Yerel ajanın skill'leri
+
+`kur.sh` `.claude/skills/` altına kopyalar (`sorgulama`, `prototip`,
+`sartname-uyumu`, `prompt-butcesi`, `ajan-hatti`, …). Doktrin bunlara adıyla
+atıf yapıyor; sahibin makinesindeki Claude Code oturumu onları buradan okur.
+`v1` arşivinde yoklar; `v2`'den itibaren gelir.
 
 ## Doğrulama
 
 ```sh
 gh workflow list              # on altı iş akışı görünmeli
 gh workflow run maliyet.yml   # en basit tur; yeşil bitmeli
-gh variable list              # altı değişken
+gh variable list              # altı model/pencere değişkeni + DUYU_KALIP
 gh secret list                # dört anahtar
+gh label list                 # on iki hat etiketi
 ```
 
 Sonra bir deneme issue'su açıp `internal-check` etiketi koyun: üç ajan da
