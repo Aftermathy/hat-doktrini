@@ -107,6 +107,9 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NUM: ${{ inputs.pr || github.event.pull_request.number }}
+          # PROJE değeri: `vars.*` çağıran deponundur, yani kalıp merkeze
+          # dokunmadan `gh variable set DUYU_KALIP` ile kurulur.
+          DUYU_KALIP_VAR: ${{ vars.DUYU_KALIP }}
         run: |
           [ -n "$GEMINI_API_KEY" ] && echo "pm=true" >> "$GITHUB_OUTPUT" || echo "pm=false" >> "$GITHUB_OUTPUT"
           # Mimar yalnızca duyuya dokunan farkta çağrılır. Ölçüt dosya yolu,
@@ -130,7 +133,19 @@ jobs:
           # ve `cap sync`in her turda yeniden yazdığı `project.pbxproj` ile
           # `Package.swift` dışarıda. Denetim PR başına fiyatlanıyor; her Swift
           # değişikliğinde mimar çağırmak bütçeyi yakar.
-          DUYU_KALIP='^\+\+\+ b/(src/|ios/App/VaultWidget/|ios/App/VaultNotificationService/|ios/App/App/VaultIntents\.swift|.*\.css$|tailwind\.config)'
+          #
+          # Kalıp bu dosyada GÖMÜLÜ DEĞİL: `SINIF: GENEL` bir dosyada Vault'un
+          # iOS yolları duruyordu ve merkeze taşındıktan sonra tüketici proje
+          # onu değiştiremiyordu — KURULUM.md "pr-check içinde yazın" diyordu
+          # ama projede yalnız sarmalayıcı var. Depo değişkeni `DUYU_KALIP`
+          # tanımsızsa aşağıdaki Vault kalıbı kalır: tarihsel varsayılan, yeni
+          # projede değişkeni kurmayan mimarı yanlış dosyalarda çağırır; o
+          # yüzden uyarı basılır.
+          VARSAYILAN_KALIP='^\+\+\+ b/(src/|ios/App/VaultWidget/|ios/App/VaultNotificationService/|ios/App/App/VaultIntents\.swift|.*\.css$|tailwind\.config)'
+          DUYU_KALIP="${DUYU_KALIP_VAR:-$VARSAYILAN_KALIP}"
+          if [ -z "${DUYU_KALIP_VAR:-}" ]; then
+            echo "UYARI: depo değişkeni DUYU_KALIP tanımsız — Vault'un kalıbı kullanılıyor: $DUYU_KALIP" >&2
+          fi
           if [ -s pr.diff ] && grep -qE "$DUYU_KALIP" pr.diff; then DUYU=true; fi
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "mimar=false" >> "$GITHUB_OUTPUT"
@@ -140,7 +155,7 @@ jobs:
             echo "mimar=false" >> "$GITHUB_OUTPUT"
             DEGISEN=$(grep -oE '^\+\+\+ b/[^ ]+' pr.diff | sed 's|^+++ b/||' | head -12 | tr '\n' ' ')
             if ! gh pr view "$NUM" --json comments --jq '.comments[].body' | grep -q '^\*\*Mimar çağrılmadı'; then
-              gh pr comment "$NUM" --body "**Mimar çağrılmadı:** bu farkta duyuya dokunan dosya yok (\`src/\`, \`ios/App/VaultWidget/\`, \`ios/App/VaultNotificationService/\`, \`VaultIntents.swift\`, \`.css\`, \`tailwind.config\`). Değişen dosyalar: ${DEGISEN:-yok}." >/dev/null 2>&1 || true
+              gh pr comment "$NUM" --body "**Mimar çağrılmadı:** bu farkta duyuya dokunan dosya yok (kalıp \`DUYU_KALIP\`: \`${DUYU_KALIP}\`). Değişen dosyalar: ${DEGISEN:-yok}." >/dev/null 2>&1 || true
             fi
             echo "mimar atlandı: duyuya dokunan dosya yok"
           fi
