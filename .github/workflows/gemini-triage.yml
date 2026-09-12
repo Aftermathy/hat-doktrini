@@ -230,7 +230,12 @@ jobs:
             cat docs/ROADMAP.md
             echo
             echo "# Baş mühendisin notları"
-            cat docs/ENGINEERING-NOTES.md
+            # Eski tek dosyalı notlar yolu. Yeni projede bu dosya yok ve notlar
+            # docs/notes/ altında; dosya yoksa set -e altında düşmek merkezin
+            # kusuru olurdu (ölçüldü: teknik-ofis kurulumu). Varsa basılır, yoksa
+            # notlar dizininin özeti gider — gemini-pm ile aynı yol.
+            if [ -f docs/ENGINEERING-NOTES.md ]; then cat docs/ENGINEERING-NOTES.md; fi
+            node hat/.github/scripts/not-ozet.mjs --dizin docs/notes --adet 20 --butce "${NOT_BUTCESI:-16000}" 2>/dev/null || true
             echo
             echo "# Teknik kurallar"
             cat CLAUDE.md
