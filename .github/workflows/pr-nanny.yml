@@ -225,13 +225,33 @@ jobs:
           # varsayılanına (GITHUB_TOKEN) döner: hat PAT olmadan da koşar,
           # yalnız iş akışına dokunan PR'ları paketleyemez.
           token: ${{ secrets.TOPLU_PAT || secrets.GITHUB_TOKEN }}
+      # Reusable workflow'daki checkout ÇAĞIRAN depoyu indirir; betikler
+      # (llm.sh, kaynak-sec.mjs, …) merkezde durur ve çağıranda yoktur.
+      # İkinci checkout merkezi `hat/` altına, bu iş akışının çağrıldığı
+      # commit'ten indirir: `job_workflow_sha` etiket ne ise odur, yani betik
+      # ile iş akışı hiçbir zaman ayrı sürümden koşmaz. Depo public; jeton yok.
+      #
+      # Bu adım düşerse iş burada ölür ve sonraki adımlar hiç koşmaz: PR'a
+      # durum yazılmaz, yorum düşmez. Bu istenen davranış — boş statü "hüküm
+      # yok" diye okunur (toplu-pr bekler, kırmızıya çevirmez); yarım bir
+      # kurulumla yazılmış yanlış bir hüküm ise kapıdan geçerdi.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Aftermathy/hat-doktrini
+          ref: ${{ github.job_workflow_sha }}
+          path: hat
+          persist-credentials: false
+          # Yalnız betikler iner: merkezin tamamı (belgeler, skill'ler) bu işin
+          # ihtiyacı değil ve indirilmeyen bayt en ucuz bayttır.
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
 
       - name: Çakışmayı onar
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          source .github/scripts/kota-kapisi.sh
+          source hat/.github/scripts/kota-kapisi.sh
           git config user.name "pr-nanny"
           git config user.email "pr-nanny@users.noreply.github.com"
 
@@ -360,7 +380,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          source .github/scripts/kota-kapisi.sh
+          source hat/.github/scripts/kota-kapisi.sh
           # Açılış olayı düştüğünde CI koşusu **hiç yaratılmıyor**: iptal de
           # atlanmış da görünmüyor, yalnızca yok. Bakıcının eski radarı
           # çakışmaya ve denetçi hükmüne bakıyordu; sessizce duran iş tam
@@ -548,7 +568,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          source .github/scripts/kota-kapisi.sh
+          source hat/.github/scripts/kota-kapisi.sh
           # CodeRabbit kota sınırına takıldığında commit durumunu
           # `state: success` / `description: "Review rate limited"` diye
           # yazıyor. Yeşil bir tik, hiç başlamamış bir incelemeyi temsil

@@ -46,6 +46,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Reusable workflow'daki checkout ÇAĞIRAN depoyu indirir; betikler
+      # (llm.sh, kaynak-sec.mjs, …) merkezde durur ve çağıranda yoktur.
+      # İkinci checkout merkezi `hat/` altına, bu iş akışının çağrıldığı
+      # commit'ten indirir: `job_workflow_sha` etiket ne ise odur, yani betik
+      # ile iş akışı hiçbir zaman ayrı sürümden koşmaz. Depo public; jeton yok.
+      #
+      # Bu adım düşerse iş burada ölür ve sonraki adımlar hiç koşmaz: PR'a
+      # durum yazılmaz, yorum düşmez. Bu istenen davranış — boş statü "hüküm
+      # yok" diye okunur (toplu-pr bekler, kırmızıya çevirmez); yarım bir
+      # kurulumla yazılmış yanlış bir hüküm ise kapıdan geçerdi.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Aftermathy/hat-doktrini
+          ref: ${{ github.job_workflow_sha }}
+          path: hat
+          persist-credentials: false
+          # Yalnız betikler iner: merkezin tamamı (belgeler, skill'ler) bu işin
+          # ihtiyacı değil ve indirilmeyen bayt en ucuz bayttır.
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
 
       - name: Anahtar var mı
         id: guard
@@ -111,7 +131,7 @@ jobs:
           # sahibe en yakın kanalı — yorumun şartnameye işlenmesi — pratikte
           # çalışmıyordu ve issue'ya tek satır not düşmüyordu.
           REV_KAYNAK_BUTCESI=${REV_KAYNAK_BUTCESI:-600000}
-          node .github/scripts/kaynak-sec.mjs \
+          node hat/.github/scripts/kaynak-sec.mjs \
             --not issue.md --butce "$REV_KAYNAK_BUTCESI" \
             --yollar "$KAYNAK_YOLLARI" --uzantilar "$KAYNAK_UZANTILARI" \
             --haric "${KAYNAK_HARIC:-}" --her-zaman "${KAYNAK_HER_ZAMAN:-}" \
@@ -151,7 +171,12 @@ jobs:
             cat docs/ROADMAP.md
             echo
             echo "# Baş mühendisin notları"
-            cat docs/ENGINEERING-NOTES.md
+            # Eski tek dosyalı notlar yolu. Yeni projede bu dosya yok ve notlar
+            # docs/notes/ altında; dosya yoksa set -e altında düşmek merkezin
+            # kusuru olurdu (ölçüldü: teknik-ofis kurulumu). Varsa basılır, yoksa
+            # notlar dizininin özeti gider — gemini-pm ile aynı yol.
+            if [ -f docs/ENGINEERING-NOTES.md ]; then cat docs/ENGINEERING-NOTES.md; fi
+            node hat/.github/scripts/not-ozet.mjs --dizin docs/notes --adet 20 --butce "${NOT_BUTCESI:-16000}" 2>/dev/null || true
             echo
             echo "# Teknik kurallar"
             cat CLAUDE.md
@@ -174,7 +199,7 @@ jobs:
 
           # Metin üretimi tek kapıdan geçer: birinci sağlayıcının kotası
           # dolduğunda ikincisi devralır, akış durmaz.
-          bash .github/scripts/llm.sh prompt.md out.md 8000
+          bash hat/.github/scripts/llm.sh prompt.md out.md 8000
 
           if head -1 out.md | grep -q 'NO_CHANGE'; then
             echo "Yorum şartname değişikliği gerektirmedi; gövdeye dokunulmadı."

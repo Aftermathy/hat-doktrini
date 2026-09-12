@@ -59,19 +59,56 @@ bir yerde olur.
 
 ### 2. Projeye özgü dosyalar
 
-Bunlar kopyalanmaz, bu proje için yazılır:
+**Bunlar kopyalanmaz — her proje kendi dosyalarını yazar.** Vault'unkine örnek
+olarak bakabilirsiniz (`github.com/Aftermathy/vault`) ama içeriğini almayın:
+o dosyalar Vault'un ürününü, kurallarını ve tuzaklarını anlatıyor. Kopyalanan
+bir `CLAUDE.md`, ajanlara var olmayan bir projeyi öğretir.
 
-| Dosya | Ne | Yoksa |
-|---|---|---|
-| `.github/workflows/ci.yml` | projenin derleme ve test komutları | kesin hüküm yok; hiçbir PR birleşemez |
-| `CLAUDE.md` | projenin kuralları, doğrulama komutları, tuzakları | mühendis ve denetçi kör |
-| `docs/PRODUCT-DNA.md` | ürünün ne olduğu ve olmadığı | ürün yöneticisi karaktersiz |
-| `docs/ROADMAP.md` | fazlar — `roadmap-keeper` bunu PR'ların `Closes #N` atfından günceller; **Fazlar bölümü boş başlar**, doğuş ritüeli doldurur | PM sıradaki işi bulamaz |
-| `CONTEXT.md` | kavram sözlüğü; aynı kavramın dört ajanda dört adı olmasın diye | her PR'da ad pazarlığı |
-| `docs/roles/mimar.md` | mimarın talimatı (`internal-check` buradan okur); Vault'unki örnek, ölçüler DNA'da | **mimar hüküm vermez** — sessizce |
-| `.agentrc` | kaynak dökümü yolları ve uzantıları (`KAYNAK_YOLLARI`, `KAYNAK_UZANTILARI`, `KAYNAK_HER_ZAMAN`) | `src` varsayılanı ve uyarı |
-| `docs/notes/` | mühendislik notları, her biri kendi dosyasında (`kur.sh` dizini açar) | özet boş döner |
-| `docs/ENGINEERING-NOTES.md` | **geçici işaretçi**: `gemini-triage` ve `gemini-revise` eski yolu hâlâ `cat` ile okuyor; yoksa o adımlar `set -e` altında düşer. İçine "notlar `docs/notes/` altında" yazın; merkez özete geçince silinir | triyaj ve revizyon düşer |
+| Dosya | Zorunlu mu | Ne içerir | Yoksa ne olur |
+|---|---|---|---|
+| `.github/workflows/ci.yml` | **evet** | Projenin derleme, lint ve test komutları. Hattın CI kapısı bu dosyanın adını arıyor; farklı ad verilecekse `TOPLU_CI_AKISI` değişkenine yazın. | Kesin hüküm yok; hiçbir PR birleşemez |
+| `CLAUDE.md` | **evet** | Projenin kuralları, doğrulama komutları, bilinen tuzakları. Ajanların ilk okuduğu dosya. | Mühendis ve denetçi kör |
+| `docs/ROADMAP.md` | **evet** | Fazlar ve sabit kararlar. Biçim kısıtları aşağıda — uyulmazsa bekçi sessizce hiçbir şey işaretlemez. **Fazlar bölümü boş başlar**, doğuş ritüeli doldurur. | PM sıradaki işi bulamaz |
+| `docs/PRODUCT-DNA.md` | evet sayılır | Ürünün ne olduğu ve **olmadığı**. Mimar denetimi bu dosyadaki kabul ölçütlerine bakıyor; yoksa "duyu" denetimi dayanaksız kalır. | Ürün yöneticisi karaktersiz |
+| `docs/roles/mimar.md` | **evet** | Mimarın talimatı; `internal-check` buradan okur. Vault'unki örnek, ölçüler DNA'da durur, burada rol tanımlanır. | **Mimar hüküm vermez** — sessizce, hata da vermez |
+| `CONTEXT.md` | önerilir | Kavram sözlüğü. Aynı kavramın dört ajanda dört adı olmasın diye; şartnameyi bir model yazıyor, ikisi denetliyor, biri kodluyor. | Her PR'da ad pazarlığı |
+| `.agentrc` | önerilir | Kaynak dökümü yolları ve uzantıları (`KAYNAK_YOLLARI`, `KAYNAK_UZANTILARI`, `KAYNAK_HER_ZAMAN`). | `src` varsayılanı ve uyarı |
+| `docs/notes/` | önerilir | Mühendislik notları, her biri kendi dosyasında; `kur.sh` dizini açar. | Notlar özeti boş döner |
+| `docs/ENGINEERING-NOTES.md` | hayır | Eski tek dosyalı notlar yolu. `v2`'den itibaren gerekmiyor (#5 merkezde kapı koydu); `v1`'de yoksa `gemini-triage` ve `gemini-revise` düşer — `v1`'de kalan proje içine "notlar `docs/notes/` altında" yazan bir dosya tutar. | `v1`: triyaj ve revizyon düşer |
+
+#### `docs/ROADMAP.md` biçim kısıtları
+
+`roadmap-keeper` bu dosyayı ayrıştırıyor. Üç şey birebir olmalı:
+
+**1. Yol tam olarak `docs/ROADMAP.md`.** Bekçi başka yere bakmaz.
+
+**2. Tamamlanacak maddeler şu biçimde:**
+
+```markdown
+- ⏳ Kullanıcı davet koduyla kasaya katılabilir (#42)
+```
+
+Bir PR `Closes #42` yazarak birleştiğinde bekçi o satırı bulup `⏳`yi `✅`
+yapıyor. Aradığı kalıp `^- ⏳.*#42` — yani satır `- ⏳` ile başlamalı ve
+issue numarası `#42` olarak geçmeli. Başka bir işaret (`- [ ]`, `* ⏳`)
+kullanırsanız bekçi hiçbir şey bulamaz ve **hata da vermez**.
+
+**3. Sabit kararlar bölümü:**
+
+```markdown
+## Sabit kararlar
+
+| Karar | Gerekçe |
+|---|---|
+| Para kuruş cinsinden tam sayı | Kayan noktalı para aritmetiği bütçede kabul edilemez |
+```
+
+Başlık birebir `## Sabit kararlar` olmalı ve altında bir markdown tablosu
+bulunmalı. PR gövdesinde `harita: sabit-karar | <karar> | <gerekçe>` satırı
+görürse bekçi yeni satırı bu tablonun sonuna ekliyor.
+
+Kapanmış fazları ayrı bir dosyaya taşıyacaksanız (`docs/ROADMAP-ARCHIVE.md`
+gibi) bekçi oraya bakmaz — arşiv tamamen sizin düzeniniz.
 
 ### 3. Mimarın çağrılacağı dosya kalıbı — `DUYU_KALIP`
 
@@ -83,9 +120,12 @@ ve **dar tutun**, denetim PR başına fiyatlanıyor:
 gh variable set DUYU_KALIP --body '^\+\+\+ b/(src/|.*\.css$|tailwind\.config)'
 ```
 
-Tanımsızsa merkez Vault'un kalıbına düşer (`src/`, `.css`, `tailwind.config`
-ve Vault'un iOS dosyaları) ve koşu günlüğüne uyarı basar. (`v1` etiketinde
-kalıp henüz gömülüdür; değişken `v2`'den itibaren okunur.)
+Tanımsızsa merkez genel kalıba düşer (`src/`, `.css`, `tailwind.config`) ve
+koşu günlüğüne uyarı basar. Native arayüz dosyaları olan proje (iOS widget,
+Swift intent) onları kalıba kendisi yazar. Kalıp geçersiz bir düzenli ifadeyse
+mimar **yine de çağrılır** ve PR'a "DUYU_KALIP bozuk" yorumu düşer — bozuk
+kalıbın bedeli bir mimar çağrısıdır, kaçırılmış bir denetim değil. (`v1`
+etiketinde kalıp gömülüdür; değişken `v2`'den itibaren okunur.)
 
 ### 4. Depo ayarları
 

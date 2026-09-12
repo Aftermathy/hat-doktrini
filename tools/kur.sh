@@ -17,8 +17,11 @@ SURUM="${HAT_SURUM:-v1}"
 ARSIV="https://github.com/Aftermathy/hat-doktrini/archive/refs/tags/${SURUM}.tar.gz"
 
 # Tek arşiv, on altı ayrı indirme değil: yarım kalan kurulum (dokuzu inmiş,
-# yedisi inmemiş) sessizce eksik bir hat demek. Arşiv ya tamamen gelir ya
-# hiç gelmez.
+# yedisi inmemiş) sessizce eksik bir hat demek. Atomikliği sağlayan boru
+# değil, yapı: `tar` dosyaları `curl` bitmeden yazmaya başlar, yani yarım
+# bir indirme TMP'ye yarım dosya bırakabilir — ama TMP hedefe ancak boru
+# sıfırla bittiyse kopyalanır; düşerse burada çıkılır ve hedefe tek dosya
+# dokunmaz.
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 echo "→ hedef: $HEDEF   sürüm: $SURUM"
@@ -71,11 +74,13 @@ echo "→ depo: $REPO"
 
 # Etiketler anlam taşır; rengi ve açıklaması da. Anlamları AGENT-WORKFLOW.md'de.
 echo "→ etiketler"
+# Sebep yutulmaz: yetki mi, oturum mu, geçersiz renk mi — kullanıcının beş
+# dakikada mı bir saatte mi çözeceğini bu satır belirliyor.
 etiket() {
-  if gh label create "$1" --color "$2" --description "$3" --force >/dev/null 2>&1; then
+  if gh label create "$1" --color "$2" --description "$3" --force >/dev/null 2>"$TMP/etiket.err"; then
     printf '   %-18s ✓\n' "$1"
   else
-    printf '   %-18s ✗ açılamadı\n' "$1"
+    printf '   %-18s ✗ açılamadı: %s\n' "$1" "$(tr '\n' ' ' < "$TMP/etiket.err")"
   fi
 }
 etiket taslak         c5def5 "Sahibin ham notu; triyaj calisir"
