@@ -51,6 +51,17 @@ jobs:
         rol: [muhendis, mimar]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Reusable workflow'daki checkout ÇAĞIRAN depoyu indirir; betikler
+      # (llm.sh, kaynak-sec.mjs, …) merkezde durur ve çağıranda yoktur.
+      # İkinci checkout merkezi `hat/` altına, bu iş akışının çağrıldığı
+      # commit'ten indirir: `job_workflow_sha` etiket ne ise odur, yani betik
+      # ile iş akışı hiçbir zaman ayrı sürümden koşmaz. Depo public; jeton yok.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Aftermathy/hat-doktrini
+          ref: ${{ github.job_workflow_sha }}
+          path: hat
+          persist-credentials: false
 
       - name: Anahtar ve etiket nöbeti
         id: guard
@@ -187,7 +198,7 @@ jobs:
             # issue'yu açtıktan sonra, yoruma bırakıyor.
             gh issue view "$NUM" --json comments --jq '.comments[].body' > raw_comments.txt 2>/dev/null || : > raw_comments.txt
             cat raw_title.txt raw_body.txt raw_comments.txt > raw_gorsel_kaynagi.txt
-            GORSELLER=$(node .github/scripts/gorsel-sec.mjs raw_gorsel_kaynagi.txt \
+            GORSELLER=$(node hat/.github/scripts/gorsel-sec.mjs raw_gorsel_kaynagi.txt \
               --tavan "${MIMAR_GORSEL_TAVANI:-4}" || true)
 
             for u in $GORSELLER; do
@@ -313,7 +324,7 @@ jobs:
               # Notun işlevi bir kararın var olduğunu ve ne dediğini bildirmek;
               # gerekçenin tamamını okumak denetçinin işi değil, dosya adı yazılı.
               echo "# Mühendislik notları (en yeni 20, özet)"
-              node .github/scripts/not-ozet.mjs \
+              node hat/.github/scripts/not-ozet.mjs \
                 --dizin docs/notes --adet 20 --butce "${NOT_BUTCESI:-16000}" || true
               echo
               echo "# Depodaki kaynak dosyalar (yalnızca adlar)"
@@ -326,7 +337,7 @@ jobs:
               # kaynak-sec KAYNAK_HER_ZAMAN'ı bütçeden önce garanti eder, yani
               # sıfır dosya görmek yapısal olarak imkânsız hâle geliyor.
               cat raw_title.txt raw_body.txt > raw_not.txt
-              node .github/scripts/kaynak-sec.mjs \
+              node hat/.github/scripts/kaynak-sec.mjs \
                 --not raw_not.txt --butce "$KAYNAK_BUTCESI" \
                 --yollar "$KAYNAK_YOLLARI" --uzantilar "$KAYNAK_UZANTILARI" \
                 --haric "${KAYNAK_HARIC:-}" --her-zaman "${KAYNAK_HER_ZAMAN:-}" \
@@ -484,7 +495,7 @@ jobs:
           # Mimar çağrısı `llm.sh`'den geçmiyor, yani sayacın dışındaydı.
           # 21 Ağustos'ta ölçüldü: sayaç $2 derken konsol $60 diyordu ve
           # farkın kaynağı buydu. Ölçülmeyen harcama olmayan harcama sanılır.
-          . .github/scripts/maliyet-yaz.sh
+          . hat/.github/scripts/maliyet-yaz.sh
           # NVIDIA cagrisi da sayaca giriyor. Ucretsiz uc noktada fatura sifir
           # ama token sayisi sifir degil, ve iki denetciyi karsilastiracak olan
           # sey tam olarak o sayi. Ucretsiz oldugu icin olcmemek, ayni dosyanin

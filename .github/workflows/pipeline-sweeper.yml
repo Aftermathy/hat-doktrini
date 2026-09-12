@@ -64,13 +64,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Reusable workflow'daki checkout ÇAĞIRAN depoyu indirir; betikler
+      # (llm.sh, kaynak-sec.mjs, …) merkezde durur ve çağıranda yoktur.
+      # İkinci checkout merkezi `hat/` altına, bu iş akışının çağrıldığı
+      # commit'ten indirir: `job_workflow_sha` etiket ne ise odur, yani betik
+      # ile iş akışı hiçbir zaman ayrı sürümden koşmaz. Depo public; jeton yok.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Aftermathy/hat-doktrini
+          ref: ${{ github.job_workflow_sha }}
+          path: hat
+          persist-credentials: false
 
       - name: Takılanları ilerlet
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          source .github/scripts/kota-kapisi.sh
+          source hat/.github/scripts/kota-kapisi.sh
 
           # Kota duvarına çarpan kol işini yapamaz ama koşuyu da devirmez:
           # öteki kollar hâlâ itebilir ve süpürücünün tek işi itmektir. Yine de

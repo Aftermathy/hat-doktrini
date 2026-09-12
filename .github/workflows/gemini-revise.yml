@@ -46,6 +46,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Reusable workflow'daki checkout ÇAĞIRAN depoyu indirir; betikler
+      # (llm.sh, kaynak-sec.mjs, …) merkezde durur ve çağıranda yoktur.
+      # İkinci checkout merkezi `hat/` altına, bu iş akışının çağrıldığı
+      # commit'ten indirir: `job_workflow_sha` etiket ne ise odur, yani betik
+      # ile iş akışı hiçbir zaman ayrı sürümden koşmaz. Depo public; jeton yok.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Aftermathy/hat-doktrini
+          ref: ${{ github.job_workflow_sha }}
+          path: hat
+          persist-credentials: false
 
       - name: Anahtar var mı
         id: guard
@@ -111,7 +122,7 @@ jobs:
           # sahibe en yakın kanalı — yorumun şartnameye işlenmesi — pratikte
           # çalışmıyordu ve issue'ya tek satır not düşmüyordu.
           REV_KAYNAK_BUTCESI=${REV_KAYNAK_BUTCESI:-600000}
-          node .github/scripts/kaynak-sec.mjs \
+          node hat/.github/scripts/kaynak-sec.mjs \
             --not issue.md --butce "$REV_KAYNAK_BUTCESI" \
             --yollar "$KAYNAK_YOLLARI" --uzantilar "$KAYNAK_UZANTILARI" \
             --haric "${KAYNAK_HARIC:-}" --her-zaman "${KAYNAK_HER_ZAMAN:-}" \
@@ -174,7 +185,7 @@ jobs:
 
           # Metin üretimi tek kapıdan geçer: birinci sağlayıcının kotası
           # dolduğunda ikincisi devralır, akış durmaz.
-          bash .github/scripts/llm.sh prompt.md out.md 8000
+          bash hat/.github/scripts/llm.sh prompt.md out.md 8000
 
           if head -1 out.md | grep -q 'NO_CHANGE'; then
             echo "Yorum şartname değişikliği gerektirmedi; gövdeye dokunulmadı."

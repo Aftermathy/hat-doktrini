@@ -49,6 +49,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      # Reusable workflow'daki checkout ÇAĞIRAN depoyu indirir; betikler
+      # (llm.sh, kaynak-sec.mjs, …) merkezde durur ve çağıranda yoktur.
+      # İkinci checkout merkezi `hat/` altına, bu iş akışının çağrıldığı
+      # commit'ten indirir: `job_workflow_sha` etiket ne ise odur, yani betik
+      # ile iş akışı hiçbir zaman ayrı sürümden koşmaz. Depo public; jeton yok.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Aftermathy/hat-doktrini
+          ref: ${{ github.job_workflow_sha }}
+          path: hat
+          persist-credentials: false
 
       - name: Diff ve çakışma durumu
         id: ctx
@@ -189,7 +200,7 @@ jobs:
             -H 'Content-Type: application/json' --data @req.json)
           # Maliyet, yanıt işe yarasın ya da yaramasın yazılıyor: 200 dönen her
           # çağrı faturalanır ve `exit 0` ile sessizce çıkılan dal sayacı atlar.
-          . .github/scripts/maliyet-yaz.sh
+          . hat/.github/scripts/maliyet-yaz.sh
           if [ "$HTTP" = "200" ]; then
             maliyet_yaz "claude/$MODEL" \
               "$(jq -r '.usage.input_tokens // 0' resp.json)" \

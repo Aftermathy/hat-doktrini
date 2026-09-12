@@ -113,6 +113,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      # Reusable workflow'daki checkout ÇAĞIRAN depoyu indirir; betikler
+      # (llm.sh, kaynak-sec.mjs, …) merkezde durur ve çağıranda yoktur.
+      # İkinci checkout merkezi `hat/` altına, bu iş akışının çağrıldığı
+      # commit'ten indirir: `job_workflow_sha` etiket ne ise odur, yani betik
+      # ile iş akışı hiçbir zaman ayrı sürümden koşmaz. Depo public; jeton yok.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Aftermathy/hat-doktrini
+          ref: ${{ github.job_workflow_sha }}
+          path: hat
+          persist-credentials: false
 
       - name: Denetim
         env:
@@ -133,7 +144,7 @@ jobs:
           # ayarlanmamış model" diye **görünür** biçimde işaretler, sessizce
           # sıfır saymaz. Ücretsiz uç noktada dolar gerçekten sıfır ama token
           # sıfır değil, ve iki haftalık karşılaştırmanın sayısı o token.
-          . .github/scripts/maliyet-yaz.sh
+          . hat/.github/scripts/maliyet-yaz.sh
 
           # Deftere yazılan ad **tek** `sağlayıcı/model` bölmesi olmak zorunda.
           # `NVIDIA_MODEL` zaten org önekli geliyor (`nvidia/nemotron-...`) çünkü
