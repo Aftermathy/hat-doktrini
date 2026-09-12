@@ -1040,3 +1040,47 @@ Hepsi bu hatta yaşandı; her biri saatler yedi.
 - Tarayıcıda çalışan sohbet modelleri repoya bağlanamaz — ürün yöneticisi ancak
   API üzerinden gerçek aktör olur
 - Denetçinin ücretsiz katmanı genelde açık kaynak repolarla sınırlıdır
+
+## Merkez doktrin değişirse: her projenin temsilcisi sınar
+
+Bu hat birden çok projenin paylaştığı bir merkezde duruyor
+(`Aftermathy/hat-doktrini`) ve projeler onu sürüm etiketiyle çağırıyor
+(`@v1`). Tek kopyanın kazancı açık: bir projede öğrenilen ders ötekilere
+geçiyor. Bedeli de açık ve kural bu bedeli karşılamak için var:
+**merkeze giren bozuk bir değişiklik aynı anda bütün projeleri kırar.**
+
+Sahibin kuralı (12 Eylül 2026):
+
+> her projenin bir temsilcisi bunu kontrol etmesi gerek, kendi projelerine
+> sorun çıkarıp çıkarmayacağını — bence lokaller yapabilir
+
+### Kim sınar
+
+Her tüketici projenin **yerel ajanı** (`lokal` etiketli işleri çözen aktör).
+Bulut mühendisi değil: merkez deposu ürün kuyruğunun dışında ve yerel ajan
+projenin gerçek ortamında koşuyor — CI'sını, anahtarlarını, zamanlanmış
+işlerini görebiliyor.
+
+### Nasıl sınanır
+
+1. **Değişiklik merkeze PR olarak gelir.** Doğrudan `main`'e itilmez; `v1`
+   etiketi de değişiklik onaylanmadan oynatılmaz.
+2. PR, tüketici projelerin listesini taşır ve her biri için bir onay satırı
+   açar.
+3. Her projenin yerel ajanı, değişikliği **kendi deposunda** sınar: sarmalayıcı
+   dalı geçici olarak `@main`'e çevirip bir tur koşturur, sonucu merkez PR'ına
+   yazar ve dalı geri alır.
+4. Tüketicilerin hepsi geçti derse merkez birleşir ve **yeni sürüm etiketi**
+   atılır (`v2`). Projeler kendi ritminde yükseltir.
+
+### Neden sürüm etiketi şart
+
+`@main` ile çağıran bir proje, merkezdeki her commit'i anında alır — yani
+başka bir projenin denemesi bu projeyi kırabilir. Etiket bunu keser: değişiklik
+merkeze inse bile proje `@v1`'de kaldığı sürece etkilenmez.
+
+### Sınanmadan geçen tek şey
+
+Belgeler (`docs/`) ve yorumlar. Onlar iş akışı çözümlemesine girmiyor; bir
+yazım düzeltmesi için üç projeyi turlamak, kuralın kendi maliyetini aşardı.
+Ölçüt şu: **çalışma zamanını değiştiren her şey sınanır.**
