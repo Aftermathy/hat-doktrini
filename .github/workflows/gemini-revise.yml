@@ -51,12 +51,21 @@ jobs:
       # İkinci checkout merkezi `hat/` altına, bu iş akışının çağrıldığı
       # commit'ten indirir: `job_workflow_sha` etiket ne ise odur, yani betik
       # ile iş akışı hiçbir zaman ayrı sürümden koşmaz. Depo public; jeton yok.
+      #
+      # Bu adım düşerse iş burada ölür ve sonraki adımlar hiç koşmaz: PR'a
+      # durum yazılmaz, yorum düşmez. Bu istenen davranış — boş statü "hüküm
+      # yok" diye okunur (toplu-pr bekler, kırmızıya çevirmez); yarım bir
+      # kurulumla yazılmış yanlış bir hüküm ise kapıdan geçerdi.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Aftermathy/hat-doktrini
           ref: ${{ github.job_workflow_sha }}
           path: hat
           persist-credentials: false
+          # Yalnız betikler iner: merkezin tamamı (belgeler, skill'ler) bu işin
+          # ihtiyacı değil ve indirilmeyen bayt en ucuz bayttır.
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
 
       - name: Anahtar var mı
         id: guard
