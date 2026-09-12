@@ -21,29 +21,12 @@ name: PR bakıcısı
 on:
   workflow_call:
 
-permissions: {}
-
-# Grup PR başına ayrışıyor, hat başına değil. Sabit grup işleri sıraya
-# sokmuyor, **eliyor**: GitHub bir grupta yalnız bir bekleyen koşu tutar ve
-# üçüncü koşu geldiğinde bekleyeni düşürür. 26 Ağustos 17:45'te üç PR birkaç
-# saniye arayla taslaktan çıktı ve ortadaki koşu (32995932529) tam bu yüzden
-# `cancelled` oldu — o PR'ın `inceleme` kontrolü de onunla birlikte düştü.
+# **İzin tavanı burada değil, çağıranda.**
 #
-# `cancel-in-progress: false` bunu engellemiyor ve engellemesi de beklenmemeli:
-# o ayar **koşan** işi koruyor, bekleyeni değil.
-#
-# `run_id` yedeği takvim ve `workflow_dispatch` kollarında devreye giriyor;
-# orada PR bağlamı yok ve her koşunun kendi grubunda olması zararsız — o
-# kollar zaten tekrar tekrar koşuyor.
-# **Eşzamanlılık burada değil, çağıranda.**
-#
-# Grup adı iki tarafta da aynı olduğunda çağıran grubu tutuyor, çağrılan
-# aynı grubu istiyor ve kendi kendini bekleyip düşüyor — iş hiç başlamıyor,
-# job listesi boş kalıyor ve hata mesajı da görünmüyor. Ölçüldü (12 Eylül,
-# `maliyet` ve `pr-check` koşularında); eşzamanlılığı yalnız sarmalayıcıda
-# bırakmak sorunu kapatıyor.
-#
-# Doğrusu da bu: aynı anda kaç tur koşacağı çağıran projenin kararı.
+# Boş bir `permissions` bloğu bu dosyada işleri kilitliyordu: reusable
+# workflow çağrıldığında iş, çağıranın verdiği tavanı aşamıyor ve boş
+# blok tavanı sıfıra çekiyordu. İşler kendi kapsamlarını aşağıda kendileri
+# tanımlıyor; tavanı sarmalayıcı veriyor.
 
 env:
   # İşaret tek yerde tanımlı, çünkü aranan satır ile yazılan satır ayrı ayrı
