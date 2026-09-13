@@ -694,10 +694,46 @@ jobs:
             exit 0
           fi
           SAYAN='[.[] | select(startswith("%s")) | select(contains("parmak:'"$PARMAK"'")) | select(test("Bu denetim yarım kaldı|Denetim yapılamadı") | not)] | length'
-          M1=$(echo "$YORUMLAR" | jq "$(printf "$SAYAN" '**Mühendis-check:**')")
-          M2=$(echo "$YORUMLAR" | jq "$(printf "$SAYAN" '**Mimar-check:**')")
+
+          # SAYIM BİR KEZ DEĞİL, YOKLAMAYLA. Ölçülen yarış (teknik-ofis #5,
+          # 13 Eylül 2026): iki denetim aynı koşuda paralel bitiyor ve her biri
+          # kendi yorumunu bıraktıktan **hemen sonra** sayıyor. Mimar 08:51:03'te
+          # saydı ve `mühendis=0 mimar=1` gördü; mühendis 08:51:17'de yorumunu
+          # bıraktı. İkisi de ötekini görmedi, sentez hiç çağrılmadı, issue
+          # `internal-check`te kaldı ve elle açılmak zorunda kaldı.
+          #
+          # Arada yalnız 14 saniye vardı. Üstelik gecikme iki yönlü: GitHub'ın
+          # yorum listesi kendi yeni yorumunu da bir süre göstermeyebiliyor,
+          # yani sorun "ötekini beklemek" değil, **listenin oturması**.
+          #
+          # Yoklama ucuz: `gh issue view` çağrısı, model yok, fatura yok. Altı
+          # deneme × 10 sn = 60 sn tavan; ölçülen 14 saniyenin dört katı.
+          #
+          # ÇİFT TETİKLEME ZARARSIZ ve bu bilerek böyle bırakıldı: iki iş de
+          # ötekini görüp ikisi de sentezi çağırabilir. `gemini-synthesis`'in
+          # kendi kapısı bunu yakalıyor — etiket artık `internal-check` değilse
+          # "iş bitmiştir" deyip atlıyor. Yani tek bir işi seçip ona dispatch
+          # yetkisi vermek gereksiz olurdu, ve o seçim o işin düştüğü koşuda
+          # sentezi tümden kaybettirirdi.
+          M1=0; M2=0
+          for deneme in 1 2 3 4 5 6; do
+            M1=$(echo "$YORUMLAR" | jq "$(printf "$SAYAN" '**Mühendis-check:**')")
+            M2=$(echo "$YORUMLAR" | jq "$(printf "$SAYAN" '**Mimar-check:**')")
+            # Sayım HER denemede yazılıyor. Arızanın ölçüldüğü koşuda mühendisin
+            # sayım satırı günlükte hiç yoktu ve teşhis o yüzden zorlaştı;
+            # görünmeyen sayı tartışılamaz.
+            echo "#$NUM sayım ${deneme}/6 (parmak:$PARMAK): mühendis=$M1 mimar=$M2"
+            [ "$M1" -ge 1 ] && [ "$M2" -ge 1 ] && break
+            [ "$deneme" -lt 6 ] || break
+            sleep 10
+            # `|| true`: tek bir API hıçkırığı yoklamayı öldürmesin; eldeki
+            # sayımla devam edilir ve sonraki deneme yeniden okur.
+            YORUMLAR=$(gh issue view "$NUM" --json comments --jq '[.comments[].body]' || echo "$YORUMLAR")
+          done
+
           if [ "$M1" -ge 1 ] && [ "$M2" -ge 1 ]; then
+            echo "#$NUM: iki denetim de yerinde — sentez çağrılıyor"
             gh workflow run "Gemini sentez" -f issue="$NUM" || true
           else
-            echo "#$NUM: bu sürümün ($PARMAK) denetimi eksik (mühendis=$M1 mimar=$M2) — sentez çağrılmadı"
+            echo "#$NUM: bu sürümün ($PARMAK) denetimi eksik (mühendis=$M1 mimar=$M2) — sentez çağrılmadı, süpürücüye bırakılıyor"
           fi
