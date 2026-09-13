@@ -336,7 +336,31 @@ jobs:
               node hat/.github/scripts/not-ozet.mjs \
                 --dizin docs/notes --adet 20 --butce "${NOT_BUTCESI:-16000}" || true
               echo
+              # Listenin KAPSAMI da yazılıyor, listenin kendisi değil yalnız.
+              # Sebebi ölçüldü (#773, 13 Eylül 2026): denetçi bu listede olmayan
+              # bir dosya için "depoda yok" dedi, sentez o cümleyi haklı buldu ve
+              # şartnamedeki DOĞRU atfı (`docs/ROADMAP.md`) var olmayan bir yola
+              # (`ROADMAP.md`) çevirdi. Şartname `agent-ready` aldı; uygulansaydı
+              # mühendis kökte yeni bir dosya açar, gerçek harita güncellenmez ve
+              # PR tamamlanmış görünürdü.
+              #
+              # Hata modelin muhakemesinde değil: liste `KAYNAK_YOLLARI`'ndan
+              # üretiliyor ve o değişken bu depoda `src supabase/migrations`.
+              # Yani `docs/` altındaki hiçbir dosya listeye **giremez** ve model
+              # "listemde yok" ile "depoda yok"u ayırt edemez — ayırt etmesi için
+              # kapsamı bilmesi gerekiyor.
+              #
+              # Dökümü genişletmek çözüm değil, ölçüldü: `docs/` 1,1 MB
+              # (196 KB üst düzey + 931 KB not). Bütçe 60 KB; `ROADMAP.md` tek
+              # başına 50 KB, `AGENT-WORKFLOW.md` 65 KB — biri bile bütçeyi
+              # yiyor. Çözüm kapsamı söylemek, kapsamı büyütmek değil.
               echo "# Depodaki kaynak dosyalar (yalnızca adlar)"
+              echo
+              echo "Bu liste **yalnızca** şu yollardan üretildi: \`${KAYNAK_YOLLARI}\`"
+              echo "(uzantılar: \`${KAYNAK_UZANTILARI}\`). Bu yolların dışındaki"
+              echo "hiçbir dosya listeye giremez — belgeler, iş akışları, yapılandırma"
+              echo "ve betikler dahil."
+              echo
               for f in $KAYNAK_LISTESI; do echo "- $f"; done
               echo
               echo "# Şartnameyle ilgili dosyaların içeriği"
@@ -361,7 +385,19 @@ jobs:
               echo
               echo "Yalnızca yukarıda içeriği verilen dosyaları gördün. Adı"
               echo "listede olup içeriği verilmeyenler hakkında kesin hüküm"
-              echo "verme; gerekiyorsa şartnamede anılmasını iste." 
+              echo "verme; gerekiyorsa şartnamede anılmasını iste."
+              echo
+              echo "**Ve bir dosyanın YOKLUĞUNU listeye bakarak iddia etme.**"
+              echo "Liste yukarıda yazılı yollarla sınırlı. Şartname o yolların"
+              echo "dışında bir dosya anıyorsa (\`docs/\`, \`.github/\`, kök"
+              echo "dizin, yapılandırma dosyaları) o dosya **senin görüş alanında"
+              echo "değildir** — var olmadığı anlamına gelmez."
+              echo
+              echo "O durumda \"depoda yok\" yazma. Yazacağın şey şu: \"bu dosya"
+              echo "kaynak dökümünün kapsamı dışında, doğrulayamıyorum\". İkisi"
+              echo "aynı cümle değil: ilki şartnameyi değiştirtir, ikincisi"
+              echo "doğrulama ister. Bu depoda ilki bir kez doğru bir dosya yolunu"
+              echo "var olmayan bir yola çevirdi."
             fi
           } > prompt_onek.md
           {
