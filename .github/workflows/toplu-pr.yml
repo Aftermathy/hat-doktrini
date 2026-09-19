@@ -113,6 +113,12 @@ jobs:
           # yalnız sunumu bot kimliğiyle açar. `checkout` zaten aynı kalıbı
           # kullanıyor (yukarıda).
           GH_TOKEN: ${{ secrets.TOPLU_PAT || secrets.GITHUB_TOKEN }}
+          # Salt okuma için ayrı belirteç. Gerekçesi aşağıda, `gh pr view`
+          # çağrısının yanında: PAT'in kapsamı `statusCheckRollup`'ı okumaya
+          # yetmiyordu ve GraphQL kapsamsız alan görünce tüm sorguyu
+          # reddediyor. Bu satır okumayı PAT'in kapsamından ve süresinden
+          # ayırıyor.
+          OKUMA_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           # Boşsa 6 sayılır. İş akışı dosyasına dokunmadan ayarlanabilsin diye
           # depo değişkeninden okunuyor.
@@ -278,7 +284,41 @@ jobs:
             # Hata bastırılmıyor, yazdırılıyor: "okunamadı" tek başına
             # teşhis edilemez bir cümle. İlk turda iki aday da böyle elendi ve
             # sebebi ancak hata metni görülünce anlaşıldı.
-            if ! VERI=$(gh pr view "$NUM" --json headRefName,title,body,mergeable,statusCheckRollup 2>/tmp/pr-hata); then
+            # OKUMA PAT İLE DEĞİL, `GITHUB_TOKEN` İLE.
+            #
+            # Ölçülen arıza (Vault #780): sunum turu 9-19 Eylül arası **on gün**
+            # boyunca bir kez bile açılmadı. Her koşu yeşil bitiyordu ve hiçbir
+            # şey toplamıyordu — doktrinin "sessiz arıza" sınıfının tam örneği.
+            # Sebep tek satırda görünüyordu:
+            #
+            #   ── #778 okunamadı: GraphQL: Resource not accessible by personal
+            #      access token (…statusCheckRollup)
+            #
+            # Belirteç geçerliydi: PR listesini okuyabiliyor, PR'ları numarasıyla
+            # tanıyordu ve yalnız `statusCheckRollup` alanında düşüyordu. Yani
+            # sorun süre dolması değil, **kapsam**: `TOPLU_PAT`'te Checks izni
+            # yok ve GraphQL kapsamsız alan görünce TÜM sorguyu reddediyor —
+            # PR "okunamadı" görünüyor, "CI'sı yok" değil.
+            #
+            # Düzeltme izni PAT'e eklemek DEĞİL, okumayı PAT'ten almak. `gh pr
+            # view` burada yalnız okuyor ve `GITHUB_TOKEN` bunu zaten
+            # yapabiliyor: yukarıdaki `permissions:` bloğu `checks: read` ve
+            # `actions: read/write` veriyor, ve o bloğun kendi yorumu tam bu
+            # sorgu için yazılmış.
+            #
+            # PAT yazma tarafında KALIYOR ve sebebi değişmedi: PR'ı insan
+            # kimliğiyle açmak (`GITHUB_TOKEN` ile açılan PR `pull_request`
+            # olayını doğurmuyor, yani sunum CI'sız kalıyor) ve
+            # `.github/workflows` altına yazabilmek.
+            #
+            # Kazanç yalnız bu arızayı kapatmak değil: okuma artık PAT'in
+            # kapsamına ve süresine bağlı değil. `TOPLU_PAT` dolduğunda ya da
+            # kapsamı daraldığında sunum hâlâ aday seçebilir; yalnız açma adımı
+            # etkilenir ve o adım sessiz değil, çünkü PR açılmayınca görünür.
+            #
+            # `github.token` reusable workflow içinde de her zaman tanımlı;
+            # ayrıca gizli anahtar geçirilmesi gerekmiyor.
+            if ! VERI=$(GH_TOKEN="$OKUMA_TOKEN" gh pr view "$NUM" --json headRefName,title,body,mergeable,statusCheckRollup 2>/tmp/pr-hata); then
               echo "── #$NUM okunamadı: $(tr '\n' ' ' < /tmp/pr-hata | cut -c1-300)"
               ATLANAN="$ATLANAN- #$NUM — PR okunamadı"$'\n'; continue
             fi
