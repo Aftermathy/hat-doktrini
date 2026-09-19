@@ -36,6 +36,43 @@ PROMPT="${1:?prompt dosyası gerekli}"
 OUT="${2:?çıktı dosyası gerekli}"
 MAKS="${3:-8000}"
 
+# DÜŞÜNEN MODELDE TAVAN BOYUTLANIR — doktrinin kendi kararı, yeni bir tercih
+# değil (`docs/AGENT-WORKFLOW.md`, "Düşünme tavanı yer — ve kısılmaz",
+# 21 Ağustos): *düşünme kısılmaz; tavan düşünmeye göre boyutlanır.*
+#
+# Sebebi ölçüldü (#782): Gemini'de `maxOutputTokens` metni değil, **düşünme
+# artı metni** sınırlıyor. Ürün yöneticisi 15–16 Eylül'de iki koşuda üst üste
+# `MAX_TOKENS` ile düştü; defter `çıktı 317 token` yazıyordu çünkü
+# `candidatesTokenCount` yalnız görünen metni sayıyor. 8000'lik tavanın
+# neredeyse tamamı düşünmeye gidiyor ve cevaba yer kalmıyordu. İki gün boyunca
+# kuyruğa hiç yeni iş girmedi ve her koşu 97,5K girdi token'ı ödeyip hiçbir şey
+# üretmedi.
+#
+# Taban 24000 ve UYDURULMADI: `gemini-synthesis` bu depoda aynı sağlayıcıyla
+# zaten 24000 kullanıyor ve kesilmeden bitiyor. Yani sayı, çalıştığı görülen
+# bir tavan.
+#
+# Kelepçe `min` değil `max`: çağıran daha büyük bir tavan verdiyse ona
+# dokunulmuyor — bu taban, bir kısıtlama değil.
+#
+# Yükseltme SESSİZ DEĞİL. Çağıranın verdiği sayıyı sessizce ezmek, bu betiğin
+# her yerde kapattığı arıza sınıfının kendisi olurdu: bir gün biri `8000`
+# yazıp 24000'in koştuğunu bilmeden bütçe hesabı yapardı.
+#
+# Neden model adından: Gemini 3 ailesi düşünen bir aile ve bu depo aynı ayrımı
+# başka bir yerde zaten yapıyor (`ai-advisor/index.ts` → `/^gemini-3/` görünce
+# `thinkingConfig` veriyor). Ad değişirse buradaki kalıp da gözden geçirilmeli;
+# kalıbın tutmadığı bir modelde taban devreye girmez ve tavan çağıranınki kalır.
+DUSUNEN_TABAN=24000
+case "${GEMINI_MODEL:-${MODEL:-gemini-3.6-flash}}" in
+  gemini-3*)
+    if [ "$MAKS" -lt "$DUSUNEN_TABAN" ]; then
+      echo "llm: düşünen model — çıktı tavanı ${MAKS} yerine ${DUSUNEN_TABAN} (düşünme kısılmaz, tavan boyutlanır)" >&2
+      MAKS="$DUSUNEN_TABAN"
+    fi
+    ;;
+esac
+
 : >"$OUT"
 
 gemini_dene() {
@@ -60,8 +97,36 @@ gemini_dene() {
            maliyet_yaz "gemini/$model" \
              "$(jq -r '.usageMetadata.promptTokenCount // 0' .llm_resp.json)" \
              "$(jq -r '.usageMetadata.candidatesTokenCount // 0' .llm_resp.json)"
+           # DÜŞÜNME AYRI SAYILIYOR, ve defter satırına karışmıyor.
+           #
+           # `candidatesTokenCount` yalnız **görünen metni** sayıyor; düşünen
+           # modellerde tavanı asıl yiyen `thoughtsTokenCount` ve o alan hiçbir
+           # yere yazılmıyordu. Bedeli #782'de ödendi: PM iki gün ölü kaldı ve
+           # defter `çıktı 317 token` derken `finishReason` `MAX_TOKENS`
+           # diyordu. İkisi birlikte okunduğunda anlamsız görünüyor; arayı
+           # kapatan sayı görünmediği için teşhis hipotez olarak kaldı.
+           #
+           # Satır ayrı, çünkü `MALIYET|` biçimi `maliyet-topla.mjs`'in
+           # okuduğu sabit bir sözleşme — alan eklemek defteri bozardı.
+           #
+           # `// ""` ile boş bırakılıyor: alanın YOKLUĞU ile gerçek sıfır aynı
+           # şey değil. Sağlayıcı alanı hiç bildirmiyorsa "düşünme 0" yazan bir
+           # günlük, ölçülmemiş bir iddiadır.
+           DUSUNME=$(jq -r '.usageMetadata.thoughtsTokenCount // ""' .llm_resp.json 2>/dev/null || echo "")
+           if [ -n "$DUSUNME" ]; then
+             echo "gemini: düşünme ${DUSUNME} token (tavan ${MAKS}, görünen metin $(jq -r '.usageMetadata.candidatesTokenCount // 0' .llm_resp.json))" >&2
+           else
+             echo "gemini: uç nokta düşünme token'ını bildirmedi (tavan ${MAKS})" >&2
+           fi
            if [ "$(jq -r '.candidates[0].finishReason // ""' .llm_resp.json)" = "MAX_TOKENS" ]; then
-             echo "gemini: çıktı tavanda kesildi (MAX_TOKENS)" >&2; return 2
+             # Kesilme sebebi burada yazılıyor, çağıranda değil: çağıran yalnız
+             # çıkış kodunu görüyor ve hangi payın tavanı yediğini bilemiyor.
+             if [ -n "$DUSUNME" ]; then
+               echo "gemini: çıktı tavanda kesildi (MAX_TOKENS) — ${MAKS} tavanın ${DUSUNME}'i düşünmeye gitti" >&2
+             else
+               echo "gemini: çıktı tavanda kesildi (MAX_TOKENS)" >&2
+             fi
+             return 2
            fi
            [ -s "$OUT" ] || return 1
            echo "gemini/$model" > "${LLM_KIM:-.llm_kim}"; echo "llm: gemini/$model" >&2; return 0 ;;
