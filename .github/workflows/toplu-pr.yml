@@ -113,12 +113,34 @@ jobs:
           # yalnız sunumu bot kimliğiyle açar. `checkout` zaten aynı kalıbı
           # kullanıyor (yukarıda).
           GH_TOKEN: ${{ secrets.TOPLU_PAT || secrets.GITHUB_TOKEN }}
-          # Salt okuma için ayrı belirteç. Gerekçesi aşağıda, `gh pr view`
-          # çağrısının yanında: PAT'in kapsamı `statusCheckRollup`'ı okumaya
-          # yetmiyordu ve GraphQL kapsamsız alan görünce tüm sorguyu
-          # reddediyor. Bu satır okumayı PAT'in kapsamından ve süresinden
-          # ayırıyor.
-          OKUMA_TOKEN: ${{ github.token }}
+          # DEPO İÇİ İŞLEMLERİN BELİRTECİ — okuma da yazma da.
+          #
+          # PAT'e yalnız iki iş kaldı ve ikisinin de sebebi kimlik:
+          # `gh pr create` (PR'ın yazarı insan olmalı, yoksa `pull_request`
+          # olayı doğmuyor ve sunum CI'sız kalıyor) ve `git push` (otomatik
+          # token `.github/workflows` altına hiçbir koşulda yazamıyor).
+          #
+          # Geri kalan her şey — aday okuma, Actions sorguları, dispatch,
+          # statü yazma, etiket — bu belirteçle yapılıyor. Sebebi ölçüldü
+          # (Vault #780, 22 Eylül): PAT'in kapsamı bunların hiçbirine
+          # yetmiyordu ve her biri ayrı ayrı 403 veriyordu:
+          #
+          #   CI dispatch edilemedi: HTTP 403: Resource not accessible by
+          #   personal access token (…/actions/workflows/ci.yml)
+          #   Sunum hükmü SHA'ya yazılamadı — PR kapısı boş kalacak.
+          #   Denetim hükmü SHA'ya yazılamadı — sunum denetimsiz.
+          #
+          # Oysa bu kapsamların üçü de yukarıdaki `permissions:` bloğunda
+          # `GITHUB_TOKEN`'a **zaten verilmiş** (`actions: write`,
+          # `statuses: write`, `issues: write`) ve o bloğun kendi yorumları
+          # tam bu çağrılar için yazılmış. Yani izin vardı, yanlış belirteçle
+          # soruluyordu.
+          #
+          # Kazanç: hat artık PAT'in kapsamına ve süresine yalnız iki noktada
+          # bağlı. `TOPLU_PAT` 28 Kasım'da doluyor; o gün sunum turu aday
+          # seçebilecek, CI'yı tetikleyebilecek ve hükmünü yazabilecek —
+          # yalnız PR açma adımı duracak, ve o adım sessiz değil.
+          DEPO_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           # Boşsa 6 sayılır. İş akışı dosyasına dokunmadan ayarlanabilsin diye
           # depo değişkeninden okunuyor.
@@ -186,7 +208,7 @@ jobs:
               DURUM=$(gh api "repos/${GITHUB_REPOSITORY}/commits/$SHA/statuses" \
                         --jq '[.[] | select(.context == "Sunum denetimi")] | first | .state // ""' 2>/dev/null || echo "")
               [ "$DURUM" = failure ] || continue
-              if gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/$SHA" \
+              if GH_TOKEN="$DEPO_TOKEN" gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/$SHA" \
                    -f state=success -f context="Sunum denetimi" \
                    -f description="Bulgular yanıtlandı — hüküm yeniden yazıldı" >/dev/null 2>&1; then
                 echo "#$PRN: denetçi bulguları yanıtlanmış, Sunum denetimi yeniden yazıldı."
@@ -318,7 +340,7 @@ jobs:
             #
             # `github.token` reusable workflow içinde de her zaman tanımlı;
             # ayrıca gizli anahtar geçirilmesi gerekmiyor.
-            if ! VERI=$(GH_TOKEN="$OKUMA_TOKEN" gh pr view "$NUM" --json headRefName,title,body,mergeable,statusCheckRollup 2>/tmp/pr-hata); then
+            if ! VERI=$(GH_TOKEN="$DEPO_TOKEN" gh pr view "$NUM" --json headRefName,title,body,mergeable,statusCheckRollup 2>/tmp/pr-hata); then
               echo "── #$NUM okunamadı: $(tr '\n' ' ' < /tmp/pr-hata | cut -c1-300)"
               ATLANAN="$ATLANAN- #$NUM — PR okunamadı"$'\n'; continue
             fi
@@ -607,7 +629,7 @@ jobs:
             #
             # `2>/dev/null` hatayı susturuyor ama çıkış kodunu susturmuyor;
             # ikisi ayrı şeyler ve bu satır yalnız birincisini yapıyordu.
-            AD=$(GH_TOKEN="$OKUMA_TOKEN" gh run list --workflow "$CI_AKIS" --branch "$DAL" --event workflow_dispatch \
+            AD=$(GH_TOKEN="$DEPO_TOKEN" gh run list --workflow "$CI_AKIS" --branch "$DAL" --event workflow_dispatch \
                    --limit 50 --json databaseId --jq '[.[].databaseId] | max // 0' 2>/dev/null || true)
             case "$AD" in
               ''|*[!0-9]*) sleep 3 ;;
@@ -653,11 +675,11 @@ jobs:
           # deneyeyim" bu dosyanın tekrar tekrar ödediği hatanın kendisi:
           # bilinmeyeni bilinen bir duruma saymak. Yedek yol artık hatanın
           # ne olduğuna bakıyor; başka her arıza durduruyor ve sebebi yazıyor.
-          if HATA=$(gh workflow run "$CI_AKIS" --ref "$DAL" -f correlation_id="$KIMLIK" 2>&1); then
+          if HATA=$(GH_TOKEN="$DEPO_TOKEN" gh workflow run "$CI_AKIS" --ref "$DAL" -f correlation_id="$KIMLIK" 2>&1); then
             KIMLIKLI=1; DISPATCH=1
             echo "CI dispatch edildi (kimlik: $KIMLIK), hüküm bekleniyor"
           elif printf '%s' "$HATA" | grep -qi 'unexpected input'; then
-            if gh workflow run "$CI_AKIS" --ref "$DAL"; then
+            if GH_TOKEN="$DEPO_TOKEN" gh workflow run "$CI_AKIS" --ref "$DAL"; then
               DISPATCH=1
               echo "::warning::$CI_AKIS correlation_id girdisini tanımıyor — seçim olay+SHA+sınır ile yapılacak."
               echo "CI dispatch edildi (kimliksiz), hüküm bekleniyor"
@@ -703,7 +725,7 @@ jobs:
           # günlüğündeki bir uyarı bu ayrımı kapıya taşımıyor ve kapıya
           # taşınmayan bir arıza, sahibin göremediği bir arıza.
           DENETCI_DISPATCH=0
-          if gh workflow run "$DENETCI_AKIS" --ref "$DAL" -f pr="${PR_URL##*/}" 2>/dev/null; then
+          if GH_TOKEN="$DEPO_TOKEN" gh workflow run "$DENETCI_AKIS" --ref "$DAL" -f pr="${PR_URL##*/}" 2>/dev/null; then
             DENETCI_DISPATCH=1
             echo "İkinci denetçi dispatch edildi ($DENETCI_AKIS, PR ${PR_URL##*/})"
           else
@@ -781,7 +803,7 @@ jobs:
               # Actions okumaları da `OKUMA_TOKEN` ile: `gh pr view` ile aynı
               # sebep. PAT'in kapsamı Actions'ı da kapsamıyor ve `permissions:`
               # bloğu `actions` kapsamını `GITHUB_TOKEN`'a zaten veriyor.
-              if HAM=$(GH_TOKEN="$OKUMA_TOKEN" gh run list --workflow "$CI_AKIS" --branch "$DAL" --event workflow_dispatch \
+              if HAM=$(GH_TOKEN="$DEPO_TOKEN" gh run list --workflow "$CI_AKIS" --branch "$DAL" --event workflow_dispatch \
                          --limit 50 --json databaseId,headSha,displayTitle 2>/dev/null); then
                 if [ "$KIMLIKLI" = 1 ]; then
                   KOSU=$(printf '%s' "$HAM" | jq -r --arg sha "$SHA" --arg ad "CI · $KIMLIK" \
@@ -801,7 +823,7 @@ jobs:
             HUKUM=""
             if [ -n "$KOSU" ]; then
               while [ "$(date -u +%s)" -lt "$SON" ]; do
-                if DURUM=$(GH_TOKEN="$OKUMA_TOKEN" gh run view "$KOSU" --json status,conclusion --jq '"\(.status) \(.conclusion // "")"' 2>/dev/null); then
+                if DURUM=$(GH_TOKEN="$DEPO_TOKEN" gh run view "$KOSU" --json status,conclusion --jq '"\(.status) \(.conclusion // "")"' 2>/dev/null); then
                   SORGU_DUSTU=0
                   case "$DURUM" in
                     completed*) HUKUM="${DURUM#completed }" ; break ;;
@@ -849,7 +871,7 @@ jobs:
           # Önce üç deneme (geçici ağ/kota arızası bunun içinde geçer).
           STATU_YAZILDI=0
           for _ in 1 2 3; do
-            if gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/$SHA" \
+            if GH_TOKEN="$DEPO_TOKEN" gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/$SHA" \
                  -f state="$DURUM_STATU" -f context="Sunum CI" \
                  -f description="$ACIKLAMA" >/dev/null 2>&1; then
               STATU_YAZILDI=1
@@ -861,9 +883,9 @@ jobs:
           [ "$STATU_YAZILDI" = 1 ] || \
             echo "::warning::Sunum hükmü SHA'ya yazılamadı ($SHA) — PR kapısı boş kalacak."
 
-          gh label create toplu --color 0E8A16 --description "Toplu sunum PR'ı" >/dev/null 2>&1 || true
-          gh label create sunuma-girmez --color B60205 --description "Toplu sunuma alınmaz" >/dev/null 2>&1 || true
-          gh pr edit "$PR_URL" --add-label toplu >/dev/null || echo "UYARI: etiket konamadı — bir sonraki tur bu sunumu görmeyebilir."
+          GH_TOKEN="$DEPO_TOKEN" gh label create toplu --color 0E8A16 --description "Toplu sunum PR'ı" >/dev/null 2>&1 || true
+          GH_TOKEN="$DEPO_TOKEN" gh label create sunuma-girmez --color B60205 --description "Toplu sunuma alınmaz" >/dev/null 2>&1 || true
+          GH_TOKEN="$DEPO_TOKEN" gh pr edit "$PR_URL" --add-label toplu >/dev/null || echo "UYARI: etiket konamadı — bir sonraki tur bu sunumu görmeyebilir."
 
           # Denetçi burada, tek sefer çağrılıyor. Bakıcının tekil PR'lara
           # inceleme istememesinin sebebi bu satır.
@@ -1047,7 +1069,7 @@ jobs:
           # yazılamamış bir hüküm, kapı için hiç hesaplanmamışla aynı şey.
           DENETIM_YAZILDI=0
           for _ in 1 2 3; do
-            if gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/$SHA" \
+            if GH_TOKEN="$DEPO_TOKEN" gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/$SHA" \
                  -f state="$DENETIM_STATU" -f context="Sunum denetimi" \
                  -f description="$DENETIM_ACIKLAMA" >/dev/null 2>&1; then
               DENETIM_YAZILDI=1
