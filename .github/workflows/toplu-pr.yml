@@ -590,8 +590,25 @@ jobs:
           # seçilmez — hüküm "okunamadı", yani kırmızı yazılır.
           ONCEKI=""
           for _ in 1 2 3; do
-            AD=$(gh run list --workflow "$CI_AKIS" --branch "$DAL" --event workflow_dispatch \
-                   --limit 50 --json databaseId --jq '[.[].databaseId] | max // 0' 2>/dev/null)
+            # `|| true` ŞART ve yokluğunun bedeli ölçüldü (Vault #780, 22 Eylül).
+            #
+            # Bu bir atama: komut ikamesinin çıkış kodunu devralıyor ve adım
+            # `bash -e` altında koşuyor. `gh` düştüğünde satır 1 döndürüyor ve
+            # betik **tam burada, tek satır günlük bırakmadan** ölüyordu.
+            # Ölçülen koşuda görünen tek şey şuydu:
+            #
+            #   Sunum açıldı: https://github.com/…/pull/795
+            #   ##[error]Process completed with exit code 1.
+            #
+            # Yani sunum PR'ı açıldı, sonra iş sessizce öldü: `toplu` etiketi
+            # konmadı ve `Sunum CI` hükmü yazılmadı. Etiketsiz bir sunumu bir
+            # sonraki tur göremiyor ve **ikinci bir sunum** açıyor — bu dosyanın
+            # etiket satırında zaten yazılı olan sonuç.
+            #
+            # `2>/dev/null` hatayı susturuyor ama çıkış kodunu susturmuyor;
+            # ikisi ayrı şeyler ve bu satır yalnız birincisini yapıyordu.
+            AD=$(GH_TOKEN="$OKUMA_TOKEN" gh run list --workflow "$CI_AKIS" --branch "$DAL" --event workflow_dispatch \
+                   --limit 50 --json databaseId --jq '[.[].databaseId] | max // 0' 2>/dev/null || true)
             case "$AD" in
               ''|*[!0-9]*) sleep 3 ;;
               *) ONCEKI="$AD"; break ;;
@@ -761,7 +778,10 @@ jobs:
             # kabul etmek bu iş akışının tekrar tekrar düştüğü kuyu.
             while [ "$(date -u +%s)" -lt "$SON" ]; do
               sleep 5
-              if HAM=$(gh run list --workflow "$CI_AKIS" --branch "$DAL" --event workflow_dispatch \
+              # Actions okumaları da `OKUMA_TOKEN` ile: `gh pr view` ile aynı
+              # sebep. PAT'in kapsamı Actions'ı da kapsamıyor ve `permissions:`
+              # bloğu `actions` kapsamını `GITHUB_TOKEN`'a zaten veriyor.
+              if HAM=$(GH_TOKEN="$OKUMA_TOKEN" gh run list --workflow "$CI_AKIS" --branch "$DAL" --event workflow_dispatch \
                          --limit 50 --json databaseId,headSha,displayTitle 2>/dev/null); then
                 if [ "$KIMLIKLI" = 1 ]; then
                   KOSU=$(printf '%s' "$HAM" | jq -r --arg sha "$SHA" --arg ad "CI · $KIMLIK" \
@@ -781,7 +801,7 @@ jobs:
             HUKUM=""
             if [ -n "$KOSU" ]; then
               while [ "$(date -u +%s)" -lt "$SON" ]; do
-                if DURUM=$(gh run view "$KOSU" --json status,conclusion --jq '"\(.status) \(.conclusion // "")"' 2>/dev/null); then
+                if DURUM=$(GH_TOKEN="$OKUMA_TOKEN" gh run view "$KOSU" --json status,conclusion --jq '"\(.status) \(.conclusion // "")"' 2>/dev/null); then
                   SORGU_DUSTU=0
                   case "$DURUM" in
                     completed*) HUKUM="${DURUM#completed }" ; break ;;
