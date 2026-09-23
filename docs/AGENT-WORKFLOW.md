@@ -917,13 +917,28 @@ vermeden model değiştirmek, yanlış yeri onarmaktır.
    her çağrı, hangi yoldan giderse gitsin, deftere yazar; yazmayan yol bir
    gün bulunur ve o gün fatura çoktan kesilmiştir.
 
-8. **İki denetçinin sebebi fazlalık değil, birbirlerinin körlüğüdür.** Tek
-   dış denetçi kotaya takıldığında commit durumunu `success` yazıp hiç
-   bakmıyordu ve son on PR'ın ikisi öyle birleşti. İkinci bir dış denetçi
-   eklendi; ikisinin de parası zaten ödeniyor. Biri susarsa öbürü konuşur, ve
-   **yeşil tik artık tek bir kotanın insafında değildir.** Yanıltıcı yeşil
-   yine de görünür kılınır: açıklaması "kota" diyen bir `success`, PR'ın
-   üstüne not düşer.
+8. **Yanıltıcı yeşil görünür kılınır.** Tek dış denetçi kotaya takıldığında
+   commit durumunu `success` yazıp hiç bakmıyordu ve son on PR'ın ikisi öyle
+   birleşti. Bir `success` "baktım, temiz" demek zorunda; "bakamadım" demek
+   için ayrı bir sinyali olmalı. Açıklaması "kota" diyen bir `success` PR'ın
+   üstüne not düşer, ve denetim yapılamadığında hüküm `success` değil `error`
+   yazılır — kapı onu "konuşmadı" diye okur, "temiz" diye değil.
+
+   **Bu madde bir zamanlar "iki denetçi" diyordu ve artık demiyor.** 12 Eylül
+   2026'da ikinci dış denetçi (CodeRabbit) rutinden çıkarıldı ve karar
+   ölçülüydü: ücretsiz katmanda satır bazlı inceleme hiç üretmiyordu — 25
+   Ağustos'tan beri 125 PR, sıfır bulgu. Yani yedeklilik zaten yoktu; kalkan
+   şey yedekliliğin kendisi değil, **yedeklilik sanısı**.
+
+   Bedeli 23 Eylül'de ilk kez göründü: NVIDIA uç noktası `503` döndü, iki
+   koşuda altı istek, sunumun denetimi hiç yapılamadı. Tek denetçili bir
+   hatta sağlayıcı **tek arıza noktasıdır** ve bu kabul edilmiş bir kalıntı,
+   gizlenmiş bir arıza değil. Kabul edilebilir olmasının sebebi yukarıdaki
+   ayrım: denetim yapılamadığında kapı yeşil yazmıyor.
+
+   Tüketici projede bu satırın karşılığı `.coderabbit.yaml`'dır; ikinci bir
+   denetçi geri getirilirse ikisi birlikte güncellenmeli — bugünkü
+   tutarsızlık tam olarak bunun atlanmasından doğdu (Vault #804).
 
 **Denetçinin de kotası vardır.** Taslak PR'da denetçi çağrılmaz: mühendis
 üzerinde çalışırken her push zaten artımlı inceleme doğurur, üstüne bakıcı da

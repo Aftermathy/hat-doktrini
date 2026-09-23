@@ -408,6 +408,35 @@ hattan çıkarılır; ya da fark ölçülemeyecek kadar küçük çıkar — o z
 olan kazanır, çünkü eşit hüküm veren iki denetçi arasında seçim fiyat
 kararıdır.
 
+### Deney bitti: birinci sonuç çıktı (23 Eylül 2026)
+
+**Karar fiilen verilmişti ve bu belge bilmiyordu.** Deney 31 Ağustos'ta
+başladı; iki hafta 14 Eylül'de doldu, karar yazılmadı ve üç hafta geçti.
+Ölçüm (son 30 gün, Vault):
+
+| kol | koşu sayısı | tetikleyici |
+|---|---|---|
+| `denetci.yml` (Claude) | **0** | yalnız `workflow_dispatch` |
+| `denetci-nvidia.yml` | **30** | `pull_request` + elle |
+
+Yani **ucuz denetçi rutini devraldı, pahalısı kapıda kaldı** — birinci sonuç.
+Claude kolu silinmedi ve silinmemeli: elle çağrılabilir durumda duruyor ve
+ucuz kolun hüküm veremediği bir günde tek çıkış yolu o.
+
+Üçüncü bir kol (CodeRabbit) 12 Eylül'de rutinden çıkarıldı; gerekçesi ölçülü
+(ücretsiz katmanda satır bazlı inceleme üretmiyordu — 25 Ağustos'tan beri 125
+PR, sıfır bulgu).
+
+**Bunun kabul edilmiş bedeli var ve adı konmalı:** hat artık tek dış denetçili,
+yani sağlayıcı **tek arıza noktası**. 23 Eylül'de ilk kez görüldü — NVIDIA uç
+noktası `503` döndü, iki koşuda altı istek, sunumun denetimi hiç yapılamadı.
+Kabul edilebilir olmasının tek sebebi şu: denetim yapılamadığında hüküm
+`success` değil `error` yazılıyor ve kapı onu "konuşmadı" diye okuyor. Yani
+kaybedilen şey yedeklilik, gizlenen şey değil.
+
+Yukarıdaki "öncesinde hiçbir denetçi hattan çıkarılmaz" cümlesi deney
+süresi içindi ve süresi doldu.
+
 ---
 
 ## 7. Bir sonraki projeye kopyalanacaklar
