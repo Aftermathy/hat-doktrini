@@ -100,6 +100,25 @@ numaralıyı alır; yani kuyruk, işin ne zaman **onaylandığına** göre işle
 zaman açıldığına göre değil. Bir işin beklemesini istiyorsan etiketi verme —
 `needs-approval` durumundaki bir issue kuyruğun tamamen dışındadır.
 
+**Alınamayan iş kuyrukta bırakılmaz — etiketi düzeltilir.** Bulut mühendisi
+`agent-ready` bir işi alamıyorsa ve sebebi kalıcıysa (ortam, yetki, ya da
+sahibin vermediği bir karar), gerekçesini yazdıktan sonra **doğru etiketi
+kendisi koyar** — `lokal` ya da `sende` — ve `agent-ready`'yi düşürür.
+Yetkisi `kusurlu` etiketiyle aynı sınıf: hüküm veren, işareti de koyar.
+
+Sebebi ölçüldü (Vault, 23 Eylül 2026): iki issue `agent-ready` durumda
+**dokuz ve on gün** bekledi. Mühendis ikisini de alamadı, ikisinde de doğru
+teşhisi ve serbest kalma şartını yazdı — ama etiket durduğu için her tur
+kuyruğun başında aynı işi bulup baştan okudu. Biri simülatör istiyordu
+(`tools/stres/` araçları sabit bir macOS yolundan oturum okuyor, yani bulut
+ortamında eksik olan tarayıcı değil **oturum ve veri**), öteki sahibin
+işaretlemesini bekliyordu. İkisi de bir gün içinde `lokal` ve `sende` olarak
+düzeltilip kapandı.
+
+Gerekçe yazmak yetmez: **gerekçe notta durur, serbest bırakma koşulu kuyrukta
+durmak zorundadır.** Etiket o koşulun kuyruktaki karşılığıdır. Sahip katılmazsa
+`agent-ready`'yi geri koyar — karar hâlâ onun, ama kuyruk bu arada akar.
+
 Triyaj, şartnamenin sonuna bir **Sıralama** başlığı koyar: iş yol haritasının
 neresine düşüyor, şimdi mi yapılmalı yoksa neyi bekliyor. İyi bir fikrin sırası
 gelmemiş olabilir; bunu söylemek ürün yöneticisinin işidir, kararı sahibindir.
