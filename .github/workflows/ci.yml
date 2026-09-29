@@ -1,0 +1,96 @@
+# SINIF: MERKEZ — bu deponun kendi CI'ı, tüketici projelere kopyalanmaz.
+#
+# Merkezin on bir betiği ve on altı iş akışı vardı ve **hiçbiri sınanmıyordu**.
+# 29 Eylül 2026'da ölçüldü: `api-yuku.test.mjs` depoda duruyordu ama onu
+# çalıştıran hiçbir şey yoktu — yani yazıldığı günden beri hiç koşmadı.
+#
+# Bu, tüketici projelerde defalarca ölçülmüş bir arıza sınıfının aynısı:
+# duran ama koşmayan bir dosya, bakımdaymış gibi görünür. Bu depo o sınıfı
+# kendi belgelerinde adıyla anıyor ve kendi kodunda uygulamıyordu.
+#
+# Kapsam bilerek dar: **sözdizimi ve saf fonksiyon testleri.** Bir iş akışının
+# gerçekten çalıştığı ancak bir tüketici projede koşturularak öğrenilir; o
+# sınama `v2` öncesinde elle yapıldı ve doktrinin kuralı (merkez değişikliği
+# tüketici projede sınanır) yerinde kalıyor. Buradaki kapı onun yerine
+# geçmiyor, önüne geçiyor: bozuk YAML ya da kırık bir betik, sınamaya
+# gelmeden burada durur.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kontrol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v5.0.0
+        with:
+          node-version: '22'
+
+      # Betik testleri. Desen `*.test.mjs` ve dizin taraması DEĞİL: `node
+      # --test <dizin>` dizindeki `.sh` dosyalarını da çalıştırmayı deniyor ve
+      # koşu, testlerin kendisi geçse bile kırmızı bitiyor. Ölçüldü — iki test
+      # tek tek 10/10 geçerken dizin taraması `fail 1` veriyordu.
+      - name: Betik testleri
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          testler=(.github/scripts/*.test.mjs)
+          if [ ${#testler[@]} -eq 0 ]; then
+            echo "::error::.github/scripts/ altında hiç test yok — bu dosya bir kapı olmaktan çıkmış demektir."
+            exit 1
+          fi
+          echo "${#testler[@]} test dosyası: ${testler[*]}"
+          node --test "${testler[@]}"
+        shell: bash
+
+      # Kabuk betiklerinin sözdizimi. `bash -n` çalıştırmıyor, yalnız
+      # ayrıştırıyor — yan etkisi yok.
+      - name: Kabuk sözdizimi
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in .github/scripts/*.sh tools/*.sh; do
+            bash -n "$f" || { echo "::error file=$f::sözdizimi hatası"; exit 1; }
+          done
+          echo "kabuk betikleri temiz"
+        shell: bash
+
+      # Her iş akışı geçerli YAML mı ve `workflow_call` sözleşmesini taşıyor
+      # mu. İkincisi bu depoya özgü: buradaki her `SINIF: GENEL` dosya bir
+      # tüketici sarmalayıcısından çağrılıyor, yani `on.workflow_call` yoksa
+      # çağrı 422 ile düşer ve arıza tüketici projede görünür — burada değil.
+      - name: İş akışı sözleşmesi
+        run: |
+          python3 - <<'PY'
+          import glob, sys, yaml
+          hata = 0
+          for p in sorted(glob.glob('.github/workflows/*.yml')):
+              try:
+                  d = yaml.safe_load(open(p, encoding='utf-8'))
+              except Exception as e:
+                  print(f"::error file={p}::YAML ayrıştırılamadı: {e}")
+                  hata = 1
+                  continue
+              # `on` YAML'da True'ya çözülüyor (Norway problem); iki anahtarı da dene.
+              on = d.get('on', d.get(True, {})) or {}
+              ilk = open(p, encoding='utf-8').readline()
+              if 'SINIF: GENEL' in ilk and 'workflow_call' not in on:
+                  print(f"::error file={p}::SINIF: GENEL ama `on.workflow_call` yok — sarmalayıcıdan çağrılamaz")
+                  hata = 1
+          print('iş akışları ayrıştırıldı ve sözleşme denetlendi')
+          sys.exit(hata)
+          PY
+        shell: bash
