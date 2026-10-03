@@ -192,9 +192,20 @@ jobs:
                 # yeniden koşmak aynı yerden aynı hatayı almak, üstelik özel
                 # depoda kota dakikası yakmak demektir. 2026-10-03'te ölçüldü:
                 # bakiye bitti, süpürücü yeniden denedi, ikinci koşu da düştü.
+                # `--log`, `--log-failed` DEĞİL. Ölçüldü (Vault koşusu
+                # 37155201614): `--log-failed` bu koşu için **sıfır satır**
+                # döndürdü, bir başkası için yalnızca iş sonu temizlik
+                # satırlarını döndürdü — adım çıktısını hiç vermedi. Yani
+                # işaret log'da yazılıyken grep onu göremiyordu ve kapı
+                # sessizce açık kalıyordu. Çağrılan iş akışının adımlarını
+                # `gh` güvenilir biçimde eşleştiremiyor; tam log eşleştiriyor.
+                #
                 # `grep -q` burada bir KOŞUL, atama değil — eşleşmeme hâlinde
                 # döndürdüğü 1 if'in yanlış koluna gidiyor, betiği düşürmüyor.
-                if gh run view "$ID" --log-failed 2>/dev/null | grep -q "BAKIYE_BITTI"; then
+                # Log hiç alınamazsa da yanlış kola gidiyor, yani kapı
+                # **açık tarafa** düşüyor: iş bir kez boşa denenir. Tersi
+                # (kapanmak) geçici bir arızayı kalıcı sanıp işi bırakırdı.
+                if gh run view "$ID" --log 2>/dev/null | grep -q "BAKIYE_BITTI"; then
                   echo "düşen koşu $ID ($W): BAKIYE_BITTI — yeniden DENENMİYOR."
                   echo "  Sağlayıcı bakiyesi tükendi; sahip yükleyene kadar her deneme aynı yerden düşer."
                   continue
