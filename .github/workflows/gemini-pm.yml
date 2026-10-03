@@ -230,8 +230,28 @@ jobs:
             echo "kez şartnameye çevirmeden önce \`main\`'e bak; doktrin kuralı:"
             echo "\"şu koruma yok\" diyen bir madde, ilk iş korumanın yokluğunu"
             echo "doğrulamaktır."
-            gh issue list --state closed --limit 40 --json number,title \
+            # PENCERE 40 → 150 ve sebebi ölçüldü (Vault #808, 3 Ekim 2026).
+            #
+            # #808 tam bu listenin kaçırdığı yerden doğdu: #685 ile **karakter
+            # karakter aynı** başlığı taşıyordu ve #685 4 Eylül'de kapanmıştı.
+            # Arada **69 issue** kapandı, yani 40'lık pencerede #685 görünmüyordu
+            # (en eski görünen #724). Mekanizma doğruydu, penceresi dardı.
+            #
+            # 150 keyfi değil: bu depoda ayda ~70 issue kapanıyor, yani iki aylık
+            # bir bellek. Faz sonu ritüelleri aylık geldiği için bir fazın işi
+            # bir sonraki faz önerilirken hâlâ görünür kalıyor.
+            #
+            # Yalnız başlık okunuyor ve bu bilinçli: 150 issue'nun gövdesi
+            # prompt bütçesini yer. Başlık, aynı işin ikinci kez yazıldığını
+            # yakalamaya yetiyor — #808'de başlıklar birebir aynıydı.
+            gh issue list --state closed --limit 150 --json number,title \
               --jq '.[] | "- #\(.number) \(.title)"' 2>/dev/null || true
+            echo
+            echo "**Başlık benzerliği tesadüf sayılmaz.** Yazmak üzere olduğun"
+            echo "şartnamenin başlığı yukarıdaki listede bir satıra benziyorsa,"
+            echo "o issue'yu okumadan devam etme: aynı iş ikinci kez yazılmış"
+            echo "olabilir. #808 böyle doğdu — #685 ile karakter karakter aynı"
+            echo "başlık, ve düzeltme kodda (\`reachOffset\`) duruyordu."
             echo
             # Proje sahibi bir işi kapatırken ne öğrendiğini yoruma yazıyor.
             # Yalnızca başlıkları okumak o bilgiyi çöpe atar.
