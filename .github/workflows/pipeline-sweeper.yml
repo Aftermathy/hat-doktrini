@@ -88,6 +88,11 @@ jobs:
       - name: Takılanları ilerlet
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Yalnız bakiye yoklaması için: süpürücü LLM'e iş yaptırmıyor,
+          # yalnızca "para var mı" diye tek ve en küçük çağrıyı yapıyor.
+          # Anahtar yoksa yoklama atlanır ve eski davranış sürer.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
         run: |
           set -uo pipefail
           source hat/.github/scripts/kota-kapisi.sh
@@ -179,35 +184,46 @@ jobs:
           # asıl işini (taslakları ve iç kontrolü itmek) düşürmemeli.
           # 2026-08-19'da tam olarak bu oldu — kurtarma adımı kurtaracağı
           # hattı devirdi.
+          # **Bakiye bir kez yoklanıyor, log'lardan tahmin edilmiyor.**
+          #
+          # İlk tasarım düşen koşunun log'unda `BAKIYE_BITTI` arıyordu ve
+          # tüketicide sınandığında DÜŞTÜ: `gh run view --log-failed` adım
+          # çıktısını hiç vermedi, `--log` de runner içinde eşleşmedi (yerel
+          # kabukta aynı koşu için eşleşiyordu). Sebebi kovalamak yerine
+          # mekanizma değişti, çünkü log okumak arızayı **dolaylı** ölçüyordu.
+          #
+          # Doğrudan ölçüm daha kısa ve daha doğru: tur başına tek bir en
+          # küçük çağrı (1 token tavan) HTTP kodunu getiriyor. 402 ise bu
+          # turda hiçbir LLM koşusu yeniden denenmiyor. Üstünlükleri:
+          #   - log'un inip inmediğine, biçimine, bayrağına bağlı değil
+          #   - koşu sayısı kadar değil, tur başına bir çağrı
+          #   - düzeltmeden ÖNCE düşmüş koşuları da kapsıyor (onların
+          #     log'unda işaret yok, ama bakiye yine yok)
+          # Yoklama herhangi bir başka sebeple düşerse (ağ, anahtar yok) kapı
+          # **açık** tarafa düşüyor ve eski davranış sürüyor: bir kez denenir.
           (
             set +e
+            BAKIYE_VAR=1
+            if [ -n "${GEMINI_API_KEY:-}" ]; then
+              YOK_KOD=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+                -X POST "https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL:-gemini-3.6-flash}:generateContent" \
+                -H "x-goog-api-key: ${GEMINI_API_KEY}" -H 'Content-Type: application/json' \
+                --data '{"contents":[{"parts":[{"text":"."}]}],"generationConfig":{"maxOutputTokens":1}}' 2>/dev/null)
+              if [ "$YOK_KOD" = "402" ]; then
+                BAKIYE_VAR=0
+                echo "::warning::Sağlayıcı bakiyesi tükendi (HTTP 402). Bu turda düşmüş LLM koşuları yeniden DENENMİYOR — beklemek çözmez, sahibin bakiye yüklemesi gerekiyor: https://ai.studio/projects"
+              else
+                echo "bakiye yoklaması: HTTP ${YOK_KOD:-yok} — yeniden denemeler açık"
+              fi
+            fi
             SINIR=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M)
             for W in "Gemini revizyon" "Gemini sentez" "Gemini triyaj" "Gemini PM" "İç kontrol"; do
               IDLER=$(gh run list --workflow "$W" --limit 30 --json databaseId,conclusion,createdAt,attempt 2>/dev/null \
                 | jq -r --arg s "$SINIR" '[.[] | select(.conclusion=="failure") | select(.createdAt > $s) | select(.attempt < 2)] | .[].databaseId' 2>/dev/null)
               for ID in $IDLER; do
-                # Yeniden denemenin tek ön koşulu: arızanın beklemekle
-                # geçebilir olması. `llm.sh` bakiye bittiğinde (HTTP 402)
-                # `BAKIYE_BITTI` basıyor ve o arıza beklemekle geçmez —
-                # yeniden koşmak aynı yerden aynı hatayı almak, üstelik özel
-                # depoda kota dakikası yakmak demektir. 2026-10-03'te ölçüldü:
-                # bakiye bitti, süpürücü yeniden denedi, ikinci koşu da düştü.
-                # `--log`, `--log-failed` DEĞİL. Ölçüldü (Vault koşusu
-                # 37155201614): `--log-failed` bu koşu için **sıfır satır**
-                # döndürdü, bir başkası için yalnızca iş sonu temizlik
-                # satırlarını döndürdü — adım çıktısını hiç vermedi. Yani
-                # işaret log'da yazılıyken grep onu göremiyordu ve kapı
-                # sessizce açık kalıyordu. Çağrılan iş akışının adımlarını
-                # `gh` güvenilir biçimde eşleştiremiyor; tam log eşleştiriyor.
-                #
-                # `grep -q` burada bir KOŞUL, atama değil — eşleşmeme hâlinde
-                # döndürdüğü 1 if'in yanlış koluna gidiyor, betiği düşürmüyor.
-                # Log hiç alınamazsa da yanlış kola gidiyor, yani kapı
-                # **açık tarafa** düşüyor: iş bir kez boşa denenir. Tersi
-                # (kapanmak) geçici bir arızayı kalıcı sanıp işi bırakırdı.
-                if gh run view "$ID" --log 2>/dev/null | grep -q "BAKIYE_BITTI"; then
-                  echo "düşen koşu $ID ($W): BAKIYE_BITTI — yeniden DENENMİYOR."
-                  echo "  Sağlayıcı bakiyesi tükendi; sahip yükleyene kadar her deneme aynı yerden düşer."
+                # Bayrak turun başında bir kez ölçüldü; döngü onu okuyor.
+                if [ "$BAKIYE_VAR" -eq 0 ]; then
+                  echo "düşen koşu $ID ($W): bakiye yok — yeniden DENENMİYOR."
                   continue
                 fi
                 echo "düşen koşu $ID ($W) yeniden deneniyor"
