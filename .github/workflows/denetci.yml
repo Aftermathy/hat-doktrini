@@ -559,7 +559,34 @@ jobs:
           # her seferinde bir süre sonra yetmedi. Yükseltmeyi durduran şey
           # yukarıdaki bağ — girdi tavanı artık bu sayıdan türüyor, yani
           # yetmediğinde büyüyecek olan girdi değil, ikisi birden.
-          bash hat/.github/scripts/llm.sh prompt.md hukum.md "$HUKUM_TAVAN"; LLM_KOD=$?
+          # `|| LLM_KOD=$?` ŞART ve yokluğunun bedeli ölçüldü (Vault #818).
+          #
+          # `llm.sh`'in sözleşmesi üç kodlu ve **sıfırdan farklı dönüş beklenen
+          # yol**: `1` çağrı düştü, `2` çağrı başarılı oldu ama `max_tokens`
+          # tavanında kesildi. Ama `;` ile ayrılmış basit bir komut koşul
+          # bağlamında değil — adım `bash -e {0}` ile koşuyor (dosyada `shell:`
+          # yok, Linux varsayılanı) ve `1` de `2` de betiği tam bu satırda
+          # öldürüyordu. `LLM_KOD=$?` satırına hiç gelinmiyordu.
+          #
+          # Ölen satırın arkasında bıraktığı iki dal, PR'a hüküm yazan TEK
+          # yerler: tavanda kesilme yorumu ve "sağlayıcı yanıt vermedi" yorumu.
+          # İkisi de koşmuyordu. Üstüne `durum pending "Denetim sürüyor"` daha
+          # yukarıda zaten yazılmış oluyor, yani `Denetci` statüsü süresiz
+          # **pending**'de kalıyordu — ne yeşil, ne kırmızı, ne açıklama.
+          #
+          # Bu, bu dosyanın var olma sebebinin tersi. Başlığı şunu diyor:
+          # *"Sessiz bir denetçi fark edilir; `success` yazan bir denetçi fark
+          # edilmez."* Kelepçesiz hâlde denetçi **sessiz** olabiliyordu.
+          #
+          # Errexit adım genelinde kapatılmıyor ve kapatılmaması bilinçli
+          # (#634, yukarıda). Çözüm o kararı geri almak değil, bu satırı
+          # kelepçelemek: `|| …` sol tarafın başarısızlığını tüketiyor ve
+          # sağ taraftaki `$?` sol tarafın çıkış kodunu veriyor.
+          #
+          # #816 ile aynı sınıf ve aynı turda düzeltildi — orada `grep`in 1
+          # dönmesi beklenen yoldu, burada `llm.sh`'in 1 ve 2'si.
+          LLM_KOD=0
+          bash hat/.github/scripts/llm.sh prompt.md hukum.md "$HUKUM_TAVAN" || LLM_KOD=$?
 
           # İki arıza tek cümleye düşüyordu: "Sağlayıcı yanıt vermedi". Tavanda
           # kesilen çağrı için bu yanlış — sağlayıcı yanıt verdi, tavan kadar

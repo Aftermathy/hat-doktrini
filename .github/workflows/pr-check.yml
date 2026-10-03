@@ -174,8 +174,26 @@ jobs:
           # olmalı, kaçırılmış bir denetim değil — açık tarafa düşülür.
           # Boş girdide geçerli kalıp 1 (eşleşme yok), geçersiz kalıp 2 döner.
           # Ölçüldü: ^\+\+\+ b/(src/|.*\.css$) → 1 · ^\+\+\+ b/(src/[ → 2
-          printf '' | grep -qE "$DUYU_KALIP" 2>/dev/null
-          KALIP_SONUC=$?
+          # `|| KALIP_SONUC=$?` ŞART ve yokluğunun bedeli ölçüldü (Vault #816).
+          #
+          # Adım `bash -e` altında koşuyor ve bu probe'un **başarı hâli 1**:
+          # geçerli bir kalıp boş girdide eşleşme bulamaz, `grep` 1 döner.
+          # Kelepçesiz hâlde `-e` o 1'i arıza sayıp betiği tam burada öldürdü —
+          # `KALIP_SONUC=$?` satırına hiç gelinmedi. Sonuç: incelemeye çıkan
+          # **her** PR'da adım sıfır çıktıyla `exit 1` verdi ve mimar, ürün
+          # yöneticisi ile şartname uyumu denetimlerinin üçü de hiç koşmadı.
+          # `@v2`'ye geçen depoda ilk PR ilk kırmızı oldu.
+          #
+          # Tuzak `docs/AGENT-WORKFLOW.md`'de adıyla yazılı — *"`grep` +
+          # `set -euo pipefail` sessiz katildir"* — ve yine düşüldü. Sebebi
+          # kayda değer: o uyarı `grep`in 1 dönmesinin **istenmeyen** olduğu
+          # durumlar için okunuyordu; burada 1 beklenen yol, ve aynı tuzak ters
+          # yönden ısırdı.
+          #
+          # `|| …` sol tarafın başarısızlığını tüketiyor, yani `-e`
+          # tetiklenmiyor; sağ taraftaki `$?` sol tarafın çıkış kodunu veriyor.
+          KALIP_SONUC=0
+          printf '' | grep -qE "$DUYU_KALIP" 2>/dev/null || KALIP_SONUC=$?
           KALIP_BOZUK=0
           if [ "$KALIP_SONUC" -gt 1 ]; then
             echo "UYARI: DUYU_KALIP geçersiz düzenli ifade — mimar çağrılıyor: $DUYU_KALIP" >&2
