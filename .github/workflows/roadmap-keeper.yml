@@ -58,6 +58,12 @@ permissions:
   # geçilemez. Bu izin çağıranın sarmalayıcısında da açık olmalı — çağrılan iş
   # çağıranın tavanını aşarsa koşu `startup_failure` ile ölür.
   issues: read
+  # Elle tetikleme yolu (`workflow_dispatch` + `pr` girdisi) PR gövdesini
+  # API'den okuyor; olay yolunda gövde zaten payload'da geliyor ve izne
+  # ihtiyaç yok. Bu izin eksikken elle yol baştan beri kırıktı ve bunu
+  # kimse görmedi, çünkü kurtarma yolu ancak kurtarma gerektiğinde denenir.
+  # 3 Ekim 2026'da sınanırken düştü: `PR #820 gövdesi okunamadı`.
+  pull-requests: read
 
 # Grup **olaya özel**, hat başına tek grup değil. Sabit bir ad işleri sıraya
 # sokmuyor, düşürüyor: GitHub bir grupta yalnız bir bekleyen koşu tutar ve
