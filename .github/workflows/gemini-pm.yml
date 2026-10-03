@@ -424,7 +424,31 @@ jobs:
             echo
             echo "2. **'Faz N sonu: öneriler ve yol haritası güncellemesi'** — o faz"
             echo "   boyunca biriken her şeyi tek yerde topla ve **onay kutulu bir"
-            echo "   liste** olarak sun:"
+            echo "   liste** olarak sun."
+            echo
+            echo "   **TESPİT İLE ÖNERİYİ AYNI LİSTEYE KOYMA.** İkisi ayrı soru"
+            echo "   soruyor: tespit 'bu yapıldı mı', öneri 'bu yapılsın mı'."
+            echo "   Karışınca tespitler sahibin onay kuyruğunda bekliyor ve harita"
+            echo "   geride kalıyor — ölçüldü (Vault, Ekim 2026): dokuz maddelik bir"
+            echo "   listenin dördü zaten karara bağlanmıştı, ikisi şartnameye"
+            echo "   dönüşmüştü, yalnız üçü gerçekten açıktı. O liste on gün"
+            echo "   bekledi ve bu arada harita işaretlenmedi."
+            echo
+            echo "   Doğru biçim iki ayrı bölüm, aynı issue içinde:"
+            echo "   - **'Haritaya işlenecek tespitler'** — kodda doğruladığın,"
+            echo "     yapılmış ama haritada işaretlenmemiş maddeler. Onay kutusu"
+            echo "     YOK, sahibin kararı gerekmiyor: bunlar gerçeğin kaydı."
+            echo "     Her birine KODDAN kanıt yaz (dosya ve satır), PR numarası"
+            echo "     değil — bir kez dört atıftan dördü yanlış PR'a işaret etti"
+            echo "     ve haritaya yanlış kanıt yazılması sessiz bir zarardır."
+            echo "   - **'Sahibin kararı bekleyen öneriler'** — haritada hiçbir"
+            echo "     yerde karşılığı olmayan maddeler. Onay kutulu, işaretsiz."
+            echo "     Haritada 'şimdi değil' ya da 'önerilmez' grubunda duran bir"
+            echo "     maddeyi buraya YAZMA: o karar verilmiş."
+            echo
+            echo "   Birinci bölüm boşsa yazma; ikinci bölüm boşsa issue açma."
+            echo
+            echo "   Toplanacaklar:"
             echo "   - mühendislik notlarında açık kalan ürün kararları"
             echo "   - denetçi yorumlarında tekrar eden kalıplar"
             echo "   - proje sahibinin issue ve PR yorumlarında geçen, henüz iş"
