@@ -337,6 +337,21 @@ pencerede biriken hazır PR'ları tek bir **sunum dalında** toplar ve sahibin
   `Closes #N` atıfları hiç işlemez.
 - Sunum dalında iki konu birbiriyle çakışırsa ikincisi turdan düşer, sunum
   gövdesinde gerekçesiyle görünür ve bir sonraki tura kalır. Sessiz kırpma yok.
+- **Tek konulu tur ekonomi üretmez; ürettiği şey ikinci bakıştır.** Bu
+  adımın yazılı gerekçesi "aynı satırlar 40 parçada 40 kez değil, bir kez
+  ödenir". Tek konu varken o hesap boş: sayı iki tarafta da bir. 3 Ekim
+  2026'da Vault #821 tek konu taşıdı ve yine de işe yaradı — sunum kapısı,
+  tekil PR'ın kapılarının görmediği **dokuz** bulgu çıkardı; dördü haklı
+  çıkıp koda düştü, beşi kodda ölçülerek reddedildi. Yani faydası gerekçesi
+  değildi: ayrı denetçi kümesi ayrı şey görüyor. Bu ayrım yazılı olmalı,
+  çünkü yazılı olmazsa tek konulu tur "boşa masraf" sanılıp kapatılır ve
+  kapatan kişi ikinci bakışı da kapattığını bilmez.
+- **Konusu birleşmiş bir sunum dalı boşalır ve kapatılır.** Tekil PR
+  doğrudan birleştirilirse sunum dalının diff'i boşa düşer. Kapatmak doğru
+  ama şart var: tekil PR **merge commit** ile birleşmiş olmalı, yoksa
+  `Closes #N` atıfları hiç işlemez ve boş sanılan dal aslında atfı taşıyan
+  tek yerdir. Ölçüm `git diff --stat origin/main...<dal>` ile yapılır; boş
+  olduğu görülmeden kapatılmaz.
 - **Açık bir sunum dururken yeni tur açılmaz.** Hattın hızını sahibin bakma
   hızı belirler; ikinci sunum açmak aynı satırları ikinci kez denetletmek ve
   sahibe iki kapı göstermek olurdu.
@@ -958,6 +973,34 @@ vermeden model değiştirmek, yanlış yeri onarmaktır.
    Tüketici projede bu satırın karşılığı `.coderabbit.yaml`'dır; ikinci bir
    denetçi geri getirilirse ikisi birlikte güncellenmeli — bugünkü
    tutarsızlık tam olarak bunun atlanmasından doğdu (Vault #804).
+
+**Bakiyenin bitmesi kotanın dolması değildir, ve ikisi aynı kodla
+bildirilemez.** 3 Ekim 2026'da Gemini `402 Your prepayment credits are
+depleted` döndü. `llm.sh` bütün sağlayıcı arızalarını tek kodla (1)
+bildiriyordu ve o kodun sözleşmedeki anlamı "iş **ertelenir**" idi. Koşu
+kırmızıya düştü, ekrana *"süpürücü yeniden deneyecek"* yazdı, süpürücü
+yeniden denedi, ikinci koşu da aynı yerden düştü.
+
+Verilen söz tutulamıyordu, çünkü iki arızanın çözümü zıt:
+
+| | 429 kota | 402 bakiye |
+|---|---|---|
+| Beklemek | **çözer** — saat başı yenilenir | çözmez, hiç |
+| Doğru davranış | kısa uyku, üç deneme, sonra ertele | tek tur, dur, **sahibi çağır** |
+| Yeniden deneme | işin kendisi | boşa yanan kota dakikası |
+
+Bu yüzden `llm.sh`'nin çıkış sözleşmesine üçüncü kod girdi: **3 = bakiye
+bitti.** Gerekçe, 2'nin 1'den ayrılma gerekçesinin aynısı — *ayırt edilemeyen
+arıza düzeltilemez.* Kod 3 `BAKIYE_BITTI` işaretini basıyor,
+`pipeline-sweeper.yml` düşen bir koşuyu yeniden koşturmadan önce o işareti
+arıyor ve bulursa **denemiyor**. İki dosya tek dizgeyle bağlı ve
+`tools/llm-cikis-kodu.test.sh` o bağı kilitliyor: testin biri 402'nin kod 3
+döndürdüğünü, öteki o kolda "süpürücü yeniden deneyecek" cümlesinin
+**basılmadığını** sınıyor. İkinci sınama birincisinden önemli — yanlış kod bir
+arızadır, tutulamayan söz sahibin yanlış beklemesidir.
+
+Özel depoda ikinci bir bedel var: her boşa yeniden deneme Actions dakikası
+yakıyor ve o dakika kotalı (Eylül 2026'da 2000'in 408'i kullanıldı).
 
 **Denetçinin de kotası vardır.** Taslak PR'da denetçi çağrılmaz: mühendis
 üzerinde çalışırken her push zaten artımlı inceleme doğurur, üstüne bakıcı da

@@ -68,6 +68,26 @@ jobs:
           echo "kabuk betikleri temiz"
         shell: bash
 
+      # Kabuk testleri. Node testleri saf fonksiyonları tutuyor; bu kapı
+      # `llm.sh`'nin **çıkış kodu sözleşmesini** tutuyor ve ağa çıkmıyor —
+      # `curl` bir gölgeyle değiştiriliyor, HTTP kodu senaryoyla veriliyor.
+      # Sözleşme sınanmazsa kodda kalır ama bir sonraki düzenlemede sessizce
+      # erir: 402 ile 429'un ayrımı tam olarak böyle bir ayrım.
+      - name: Kabuk testleri
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          testler=(tools/*.test.sh)
+          if [ ${#testler[@]} -eq 0 ]; then
+            echo "::error::tools/ altında hiç kabuk testi yok"
+            exit 1
+          fi
+          for t in "${testler[@]}"; do
+            echo "── $t"
+            bash "$t" || { echo "::error file=$t::kabuk testi kırmızı"; exit 1; }
+          done
+        shell: bash
+
       # Her iş akışı geçerli YAML mı ve `workflow_call` sözleşmesini taşıyor
       # mu. İkincisi bu depoya özgü: buradaki her `SINIF: GENEL` dosya bir
       # tüketici sarmalayıcısından çağrılıyor, yani `on.workflow_call` yoksa

@@ -16,6 +16,15 @@
 #   0  çıktı üretildi
 #   1  çağrı düştü (ağ, kota, anahtar yok, boş yanıt) — iş ertelenir
 #   2  çağrı **başarılı** oldu ve çıktı tavanında kesildi (max_tokens)
+#   3  sağlayıcının ön ödemeli bakiyesi bitti (HTTP 402) — beklemek çözmez
+#
+# 3'ün 1'den ayrılması aynı gerekçenin ikinci uygulaması. 1 "ertelenir"
+# demek, yani "bekle, geçer". 402 geçmez: 2026-10-03'te ölçüldü, Gemini
+# `prepayment credits are depleted` döndü ve hat bunu 1 olarak bildirdi —
+# koşu kırmızıya düşüp "süpürücü yeniden deneyecek" dedi, süpürücü yeniden
+# denedi, ikinci koşu da aynı yerden düştü. Verilen söz tutulamıyordu, çünkü
+# bu arızanın çözümü ne beklemek ne girdiyi küçültmek: **sahibin bakiye
+# yüklemesi**. Üçüncü bir çözümü olan arıza üçüncü bir kod ister.
 #
 # İkisi tek koda düşerken çağıranın yazabildiği tek cümle "sağlayıcı yanıt
 # vermedi" idi ve bu, tavanda kesilen çağrı için yanlıştı: sağlayıcı yanıt
@@ -139,6 +148,12 @@ gemini_dene() {
         if [ "$deneme" -lt 3 ]; then sleep $((deneme * 20)); continue; fi
         echo "gemini $http (üç deneme tükendi): $(jq -r '.error.message // "kota ya da aşırı yük"' .llm_resp.json)" >&2
         return 1 ;;
+      # 402 ön ödemeli bakiye: 429'un ZIDDI. 429'da beklemek doğru çözümdür,
+      # burada beklemek yanlış cevabı tekrar etmektir. Bu yüzden ne uyku ne
+      # yeniden deneme var — tek tur, ayrı kod, ve sebep adıyla yazılıyor.
+      402)
+        echo "gemini 402: $(jq -r '.error.message // "ön ödemeli bakiye tükendi"' .llm_resp.json)" >&2
+        return 3 ;;
       *) echo "gemini $http: $(jq -r '.error.message // empty' .llm_resp.json)" >&2; return 1 ;;
     esac
   done
@@ -207,6 +222,20 @@ claude_dene() {
 # katlanır. Erteleme de işe yaramaz — süpürücünün bir sonraki turu aynı
 # girdiyle aynı duvara çarpar. Bu arızanın çözümü zamanda değil, girdinin
 # boyutunda; o yüzden burada durup çağırana sebebi söylüyoruz.
+# Bakiye bittiğinde yazılan metin, SÜPÜRÜCÜNÜN OKUDUĞU metindir: `BAKIYE_BITTI`
+# işareti burada basılıyor ve `pipeline-sweeper.yml` düşen bir koşuyu yeniden
+# koşturmadan önce o işareti arıyor. İşaret değişirse süpürücü körleşir ve
+# imkânsız bir işi yeniden denemeye döner — iki dosya bu dizgeyle bağlı.
+bakiye_bitti() {
+  echo "llm: BAKIYE_BITTI — sağlayıcının ön ödemeli bakiyesi tükendi." >&2
+  echo "llm: Bu bir ağ ya da kota arızası DEĞİL ve beklemekle geçmez. İş" >&2
+  echo "llm: ertelenmiyor, BLOKE: sahip bakiye yükleyene kadar bu çağrı her" >&2
+  echo "llm: denemede aynı yerden düşer. Süpürücü bunu yeniden denemez." >&2
+  echo "llm: Çözüm: https://ai.studio/projects — ya da acele varsa bu koşuya" >&2
+  echo "llm: LLM_YEDEK=1 verilerek yedek sağlayıcı bilerek açılır." >&2
+  exit 3
+}
+
 tavan_kesildi() {
   echo "llm: çıktı tavanı (${MAKS} token) aşıldı — çağrı yanıt verdi ama metin" >&2
   echo "llm: yarıda kesildi. Bu bir sağlayıcı arızası DEĞİL: girdi, bu tavanın" >&2
@@ -224,12 +253,19 @@ case "${LLM_SAGLAYICI:-}" in
     gemini_dene; kod=$?
     [ "$kod" -eq 0 ] && exit 0
     [ "$kod" -eq 2 ] && tavan_kesildi
+    [ "$kod" -eq 3 ] && bakiye_bitti
     echo "llm: gemini seçilmişti ve düştü — iş ertelendi (yedeğe düşülmez)." >&2; exit 1 ;;
 esac
 
 gemini_dene; kod=$?
 [ "$kod" -eq 0 ] && exit 0
 [ "$kod" -eq 2 ] && tavan_kesildi
+
+# Bakiye kontrolü yedek kararından ÖNCE geliyor. Sırası önemli: aşağıdaki
+# blok "yedek kendiliğinden devreye girmez" kuralını uyguluyor ve 402'de de
+# aynı kural geçerli — ama gerekçe farklı yazılmalı, yoksa sahip kırmızı
+# koşuda "ertelendi" görür ve bekler. Beklemek burada hiçbir şey çözmüyor.
+[ "$kod" -eq 3 ] && bakiye_bitti
 
 # Yedek artık **kendiliğinden** devreye girmiyor.
 #
