@@ -52,6 +52,12 @@ on:
 
 permissions:
   contents: write
+  # Yalnız okuma, ve yalnız tek şey için: `Closes #N` eşleşmediğinde o
+  # issue'nun BAŞLIĞI okunuyor. Başlık `Faz N:` ile başlıyorsa kapanan iş bir
+  # yol haritası maddesidir ve haritada işaretlenmemiş olması sessiz
+  # geçilemez. Bu izin çağıranın sarmalayıcısında da açık olmalı — çağrılan iş
+  # çağıranın tavanını aşarsa koşu `startup_failure` ile ölür.
+  issues: read
 
 # Grup **olaya özel**, hat başına tek grup değil. Sabit bir ad işleri sıraya
 # sokmuyor, düşürüyor: GitHub bir grupta yalnız bir bekleyen koşu tutar ve
@@ -170,6 +176,23 @@ jobs:
               DEGISTI=1
             else
               echo "#${N}: haritada bekleyen satır bulunamadı, dokunulmadı"
+              # Eşleşmemek normalin kendisidir: PR'ların çoğu bir kusuru
+              # kapatıyor ve kusurun haritada satırı yok. Bu yüzden her
+              # eşleşmeyene uyarı basmak gürültüdür ve gürültülü uyarı
+              # okunmaz hâle gelir — kapının işe yaramaz olması budur.
+              #
+              # Ayırt edici sinyal başlıkta: yol haritası maddesinden doğan
+              # issue `Faz N:` diye başlıyor (#806, #807 böyle). Böyle bir iş
+              # kapanıp harita işaretlenmemişse arıza gerçektir ve tam olarak
+              # bu sessizlik, ölçülmüş en pahalı arızanın kaynağı: 10 günde
+              # kapanan 19 issue'nun 12'si `not planned`'dı, çünkü PM
+              # işaretlenmemiş fazı yapılmamış okuyup yeniden öneriyordu.
+              BASLIK_N=$(gh issue view "$N" --json title --jq '.title' 2>/dev/null || true)
+              case "$BASLIK_N" in
+                Faz\ *)
+                  echo "::warning::#${N} bir yol haritası maddesi ("${BASLIK_N}") ve kapandı, ama docs/ROADMAP.md'de onu işaretleyecek satır yok. Bekçi yalnız numarayı TAŞIYAN bekleyen satırı işaretliyor: ilgili ⏳ satırına '(#${N})' yazılmalı, yoksa madde yapıldığı hâlde haritada bekliyor görünür ve yeniden önerilir."
+                  ;;
+              esac
             fi
           done
 
