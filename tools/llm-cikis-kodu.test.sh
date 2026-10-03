@@ -45,8 +45,9 @@ dene() { # senaryo, beklenen_kod, beklenen_dizge
   echo "geçti: senaryo $s → kod $kod${kalip:+, '$kalip' basıldı}"
 }
 
-# 402 bakiye: kod 3 ve süpürücünün aradığı işaret. İşaret dizgesi
-# `pipeline-sweeper.yml` ile paylaşılıyor; burada değişirse orada da değişmeli.
+# 402 bakiye: kod 3 ve log'a basılan işaret. İşaret bir kapının girdisi
+# DEĞİL (süpürücü bakiyeyi kendisi yokluyor); sahibin log'da arızayı adıyla
+# görmesi için duruyor. Sınanan asıl şey çıkış kodu.
 dene 402 3 "BAKIYE_BITTI"
 # 402, "ertelendi" DEMEMELİ: o cümle tutulamayacak bir sözdür.
 if grep -q "süpürücü yeniden deneyecek" "$D/log-402.txt"; then

@@ -222,10 +222,12 @@ claude_dene() {
 # katlanır. Erteleme de işe yaramaz — süpürücünün bir sonraki turu aynı
 # girdiyle aynı duvara çarpar. Bu arızanın çözümü zamanda değil, girdinin
 # boyutunda; o yüzden burada durup çağırana sebebi söylüyoruz.
-# Bakiye bittiğinde yazılan metin, SÜPÜRÜCÜNÜN OKUDUĞU metindir: `BAKIYE_BITTI`
-# işareti burada basılıyor ve `pipeline-sweeper.yml` düşen bir koşuyu yeniden
-# koşturmadan önce o işareti arıyor. İşaret değişirse süpürücü körleşir ve
-# imkânsız bir işi yeniden denemeye döner — iki dosya bu dizgeyle bağlı.
+# `BAKIYE_BITTI` işareti SAHİP için, makine için değil. Bir ara süpürücü bu
+# dizgeyi düşen koşunun log'unda arıyordu; tüketicide sınandı ve çalışmadı
+# (`gh run view --log-failed` adım çıktısını vermiyor, `--log` de runner
+# içinde eşleşmedi). Süpürücü artık bakiyeyi kendisi yokluyor, yani bu dizge
+# hiçbir kapının girdisi değil: serbestçe değiştirilebilir, yalnız log'u
+# okuyan insanın arızayı adıyla görmesine yarıyor.
 bakiye_bitti() {
   echo "llm: BAKIYE_BITTI — sağlayıcının ön ödemeli bakiyesi tükendi." >&2
   echo "llm: Bu bir ağ ya da kota arızası DEĞİL ve beklemekle geçmez. İş" >&2

@@ -991,13 +991,24 @@ Verilen söz tutulamıyordu, çünkü iki arızanın çözümü zıt:
 
 Bu yüzden `llm.sh`'nin çıkış sözleşmesine üçüncü kod girdi: **3 = bakiye
 bitti.** Gerekçe, 2'nin 1'den ayrılma gerekçesinin aynısı — *ayırt edilemeyen
-arıza düzeltilemez.* Kod 3 `BAKIYE_BITTI` işaretini basıyor,
-`pipeline-sweeper.yml` düşen bir koşuyu yeniden koşturmadan önce o işareti
-arıyor ve bulursa **denemiyor**. İki dosya tek dizgeyle bağlı ve
-`tools/llm-cikis-kodu.test.sh` o bağı kilitliyor: testin biri 402'nin kod 3
-döndürdüğünü, öteki o kolda "süpürücü yeniden deneyecek" cümlesinin
-**basılmadığını** sınıyor. İkinci sınama birincisinden önemli — yanlış kod bir
-arızadır, tutulamayan söz sahibin yanlış beklemesidir.
+arıza düzeltilemez.* `tools/llm-cikis-kodu.test.sh` bu kodu kilitliyor:
+testin biri 402'nin kod 3 döndürdüğünü, öteki o kolda "süpürücü yeniden
+deneyecek" cümlesinin **basılmadığını** sınıyor. İkinci sınama birincisinden
+önemli — yanlış kod bir arızadır, tutulamayan söz sahibin yanlış beklemesidir.
+
+Süpürücü tarafında ilk tasarım yanlıştı ve **tüketici sınaması onu yakaladı**:
+düşen koşunun log'unda `BAKIYE_BITTI` aranıyordu. Çalışmadı. `gh run view
+--log-failed` adım çıktısını hiç vermiyor; `--log` yerel kabukta aynı koşu
+için eşleşirken runner içinde eşleşmedi. İkinci tasarım sebebi kovalamayı
+bıraktı ve **doğrudan ölçtü**: süpürücü tur başına tek bir en küçük Gemini
+çağrısı (1 token tavan) yapıp HTTP kodunu okuyor; 402 ise o turda hiçbir LLM
+koşusu yeniden denenmiyor ve `::warning::` ile sahibe anotasyon düşüyor.
+
+Dersin kendisi mekanizmadan geniş: **bir arızayı log'undan tanımak dolaylı
+ölçümdür.** Log'un inip inmediği, hangi bayrakla indiği, biçimi — hepsi
+arızanın kendisiyle ilgisi olmayan değişkenler. Ölçülecek şey "para var mı"
+ise, sorulacak yer sağlayıcıdır. Doğrudan ölçüm ayrıca düzeltmeden **önce**
+düşmüş koşuları da kapsıyor; log'a bakan kapı onları asla göremezdi.
 
 Özel depoda ikinci bir bedel var: her boşa yeniden deneme Actions dakikası
 yakıyor ve o dakika kotalı (Eylül 2026'da 2000'in 408'i kullanıldı).
@@ -1010,6 +1021,12 @@ kalır.
 ## Bilinen tuzaklar — bir kez düşülür, iki kez düşülmez
 
 Hepsi bu hatta yaşandı; her biri saatler yedi.
+
+- **`gh run view --log-failed` adım çıktısını vermez.** Düşen bir koşunun
+  neden düştüğünü aramak için kullanılırsa boş döner ya da yalnızca iş sonu
+  temizlik satırlarını verir; aranan satır log'da dururken bulunamaz. Teşhis
+  için `--log` kullanılır. Bir kapı buna dayanırsa sessizce açık kalır —
+  3 Ekim 2026'da tam bu oldu ve yalnız tüketici sınaması gösterdi.
 
 - **Botun koyduğu etiket olay doğurmaz.** `GITHUB_TOKEN` ile eklenen etiket
   `issues: labeled` tetiklemez. Zincirin bir sonraki halkası ya
