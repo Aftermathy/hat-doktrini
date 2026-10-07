@@ -36,7 +36,18 @@ permissions:
 
 jobs:
   revise:
+    # `state == 'open'` kapısı ölçülmüş bir israftan geldi (7 Ekim 2026):
+    # kapalı bir issue'ya düşen yorum tam bir revizyon turu başlatıyordu —
+    # checkout, kaynak dökümü, LLM çağrısı. Kapalı bir işin revizyonu
+    # tanım gereği hiçbir şey üretemez: iş bitmiş, şartname geçmiş.
+    #
+    # O gün sahibin kuyruğu nota indirilirken on issue kapatıldı ve her
+    # kapanış yorumu bu turu tetikledi. Bakiye boş olduğu için koşular
+    # kırmızı bitti ve israf görünür oldu; bakiye dolu olsaydı aynı israf
+    # **token olarak** ödenir ve hiçbir yerde görünmezdi. Arızanın pahalı
+    # hâli, görünmeyen hâliydi.
     if: >-
+      github.event.issue.state == 'open' &&
       !github.event.issue.pull_request &&
       github.event.comment.user.type != 'Bot' &&
       !contains(github.event.issue.labels.*.name, 'agent-ready') &&
