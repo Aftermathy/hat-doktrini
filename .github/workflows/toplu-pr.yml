@@ -197,10 +197,35 @@ jobs:
             # olduğu değişmiyor; yalnız kapı, konuşulmuş bir hükmü sessizlikle
             # aynı kefeye koymayı bırakıyor.
             for PRN in $ACIK; do
+              # **Kapının kendi notu yanıt sayılmaz.** Ölçüldü (20 Ekim, #834):
+              # denetçi 19:06:31'de iki ENGEL bulgu yazdı, kapı 19:07:03'te
+              # kendi "Bu sunum denetlenmedi" notunu düştü, ve eşzamanlılık
+              # kuyruğunda bekleyen ikinci tur o notu mühendisin yanıtı sanıp
+              # kırmızıyı **yeşile çevirdi**. İki gerçek engel bulgu, kimse
+              # cevap vermeden temizlendi.
+              #
+              # Sebep, "mühendis" ölçütünün bir vekil olması: yazarı
+              # `github-actions` OLMAYAN son yorum mühendis sayılıyor, çünkü
+              # mühendis yanıtlarını PAT ile yazıyor (ölçüm: #822'deki
+              # "Mimarın iki bulgusu da haklı…" yorumu `Aftermathy` yazarlı).
+              # Kapının notu da aynı jetonla yazılıyor, yani vekil ikisini
+              # ayırt edemiyor.
+              #
+              # Çözüm notu kendi imzasıyla dışlamak. Jetonu değiştirmek
+              # (`github-actions` adına yazdırmak) daha temiz görünüyordu ama
+              # YANLIŞ: notun gövdesinde "Denetçi" geçiyor, yani yukarıdaki
+              # denetçi süzgecine takılır ve kapı kendi notunu denetçinin son
+              # sözü sanardı — arızayı yer değiştirmek olurdu.
+              #
+              # Yanlış yeşil, yanlış kırmızıdan pahalıdır: kırmızı işi
+              # durdurur ve görünür, yeşil denetlenmemiş kodu geçirir ve
+              # görünmez. Bu dosyanın üst yorumu bu sınıfı adıyla anıyor.
               YANIT=$(gh pr view "$PRN" --json comments --jq '
                 (.comments | map(select(.author.login == "github-actions"
                    and (.body | test("Denetçi|Denetci")))) | last | .createdAt // "") as $d
-                | (.comments | map(select(.author.login != "github-actions")) | last | .createdAt // "") as $m
+                | (.comments | map(select(.author.login != "github-actions"
+                   and (.body | test("^\\*\\*Bu sunum denetlenmedi\\.\\*\\*") | not)))
+                   | last | .createdAt // "") as $m
                 | if $d != "" and $m != "" and $m > $d then "evet" else "hayir" end' 2>/dev/null || echo hayir)
               [ "$YANIT" = evet ] || continue
               SHA=$(gh pr view "$PRN" --json headRefOid --jq .headRefOid 2>/dev/null) || continue
