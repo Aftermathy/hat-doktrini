@@ -205,7 +205,9 @@ jobs:
               [ "$YANIT" = evet ] || continue
               SHA=$(gh pr view "$PRN" --json headRefOid --jq .headRefOid 2>/dev/null) || continue
               [ -n "$SHA" ] || continue
-              DURUM=$(gh api "repos/${GITHUB_REPOSITORY}/commits/$SHA/statuses" \
+              # Aynı sınıf: statü okuması PAT'e bırakılmaz (yukarıdaki
+              # `statu_oku` yorumunda gerekçe yazılı).
+              DURUM=$(GH_TOKEN="$DEPO_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/commits/$SHA/statuses" \
                         --jq '[.[] | select(.context == "Sunum denetimi")] | first | .state // ""' 2>/dev/null || echo "")
               [ "$DURUM" = failure ] || continue
               if GH_TOKEN="$DEPO_TOKEN" gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/$SHA" \
@@ -943,9 +945,39 @@ jobs:
           # "ikisi de konuştu" kapısı, iki denetçi de **hâlâ çalışırken**
           # tutuyor ve tur daha ilk saniyede `failure` yazıp çıkıyordu —
           # beklemek için kurulmuş bir döngünün hiç beklememesi.
+          # **Okuma `DEPO_TOKEN` ile, PAT ile DEĞİL.** Bu satır, 23 Eylül'de
+          # onarılan "13 gün ölü kapı" arızasının DÖRDÜNCÜ katmanıydı ve o gün
+          # gözden kaçtı: on üç çağrı PAT'ten `github.token`'a taşındı, bu iki
+          # statü okuması taşınmadı. Sonuç ölçüldü (14 Ekim, #828): SHA'da
+          # `Denetci (NVIDIA)` **success** dururken kapı "NVIDIA: sessiz"
+          # yazdı ve denetimden temiz geçmiş bir sunum kırmızı kaldı.
+          #
+          # Arızanın imzası şuydu: **iki denetçi birden** sustu. Bağlam adı
+          # uyuşmazlığı yalnız birini susturur; ikisini birden susturan şey
+          # okumanın kendisidir. Doğru kanıt bu ayrımdı — context adındaki
+          # `ç`/`c` farkı ilk hipotezdi ve yanlıştı, çünkü karşılaştırma
+          # `ascii_downcase | contains("nvidia")` ile yapılıyor ve iki yazımda
+          # da tutuyor.
+          #
+          # `github.token`'ın statü okuyabildiği ayrıca doğrulandı: hem
+          # merkezin hem çağıranın izin bloğunda `statuses: write` var.
+          #
+          # **Okuma arızası artık sessizlikle aynı kelimeye konmuyor.** Çağrı
+          # düşerse fonksiyon `okunamadi` döndürüyor; çağıran bunu denetçinin
+          # susması saymıyor. Aynı ayrımı bu dosya zaten "sessiz" ile
+          # "çağrılamadı" arasında yapıyor ve gerekçesi orada yazılı: ikisi de
+          # boş statü bırakıyor ama biri denetçinin susması, öteki bizim
+          # sormamış olmamız. Üçüncüsü: sorduk, cevap geldi, biz okuyamadık.
           statu_oku() {
-            gh api "repos/${GITHUB_REPOSITORY}/commits/$SHA/status" \
-              --jq ".statuses[] | select(.context | ascii_downcase | contains(\"$1\")) | select(.state != \"pending\") | .state + \" · \" + .description" \
+            local ham kod=0
+            ham=$(GH_TOKEN="$DEPO_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/commits/$SHA/status" \
+                    --jq '[.statuses[]]' 2>/dev/null) || kod=$?
+            if [ "$kod" -ne 0 ] || [ -z "$ham" ]; then
+              echo "okunamadi"
+              return 0
+            fi
+            printf '%s' "$ham" | jq -r \
+              "map(select(.context | ascii_downcase | contains(\"$1\")) | select(.state != \"pending\")) | last | if . == null then \"\" else .state + \" · \" + .description end" \
               2>/dev/null | head -1
           }
 
@@ -983,6 +1015,7 @@ jobs:
           }
 
           NV=""
+          OKUMA_DUSTU=0
 
           while :; do
             # İki bağımsız kanıt aranıyor ve biri yetiyor. Denetçi normalde
@@ -1015,9 +1048,15 @@ jobs:
             NV=$(statu_oku "nvidia") || NV=""
 
             case "$NV" in
-              success*) DENETIM_STATU=success; DENETIM_ACIKLAMA="$NV"; break ;;
-              error*)   NV="" ;;
-              ?*)       DENETIM_STATU=failure; DENETIM_ACIKLAMA="$NV"; break ;;
+              success*)   DENETIM_STATU=success; DENETIM_ACIKLAMA="$NV"; break ;;
+              # `okunamadi`: statü API'si cevap vermedi. Denetçinin sustuğu
+              # anlamına GELMEZ, o yüzden hüküm yazılmıyor ve döngü devam
+              # ediyor — bir sonraki turda okuma tutabilir. Süre dolarsa
+              # aşağıdaki mesaj bunu "okunamadı" diye yazıyor, "sessiz" diye
+              # değil; yanlış teşhis sahibi yanlış yere baktırıyor.
+              okunamadi) NV=""; OKUMA_DUSTU=1 ;;
+              error*)     NV="" ;;
+              ?*)         DENETIM_STATU=failure; DENETIM_ACIKLAMA="$NV"; break ;;
             esac
 
             [ "$(date +%s)" -ge "$BITIS" ] && break
@@ -1034,6 +1073,13 @@ jobs:
           # teşhis hatasını mesajın içinde tekrarlamak olurdu.
           NV_YOK="sessiz"
           NV_YOK_UZUN="sessiz — statü yazmadı"
+          # Okuma düştüyse teşhis "sessiz" olamaz: denetçi konuşmuş olabilir
+          # ve biz duymamış olabiliriz. 14 Ekim'de tam bu oldu ve yanlış
+          # kelime, arızayı denetçide aratıp dört hafta kaybettirdi.
+          if [ "$OKUMA_DUSTU" = 1 ]; then
+            NV_YOK="okunamadı"
+            NV_YOK_UZUN="**okunamadı** — statü API'si cevap vermedi; denetçi konuşmuş olabilir"
+          fi
           if [ "$DENETCI_DISPATCH" != 1 ]; then
             NV_YOK="çağrılamadı"
             NV_YOK_UZUN="**çağrılamadı** — dispatch düştü, denetçi hiç koşmadı"
